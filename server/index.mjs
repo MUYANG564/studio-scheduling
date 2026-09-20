@@ -8,7 +8,7 @@ import { extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 import { handleApp } from "../functions/handler.mjs";
 import { sessionSecret } from "../functions/authlib.mjs";
-import { createFileStore } from "./store.mjs";
+import { createStore } from "./db.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const DIST = join(ROOT, "dist");
@@ -16,7 +16,7 @@ const PORT = Number(process.env.PORT || 8000);
 const HOST = process.env.HOST || "0.0.0.0";
 const DATA_FILE = process.env.DATA_FILE || join(ROOT, "data", "store.json");
 
-const store = createFileStore(DATA_FILE);
+const { client: store, mode: storeMode } = await createStore(DATA_FILE);
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -108,7 +108,7 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, HOST, () => {
   console.log(`录音棚排期系统已启动: http://${HOST}:${PORT}`);
-  console.log(`数据文件: ${DATA_FILE}`);
+  console.log(storeMode === "supabase" ? "数据存储: Supabase 在线数据库" : `数据存储: 本地文件 ${DATA_FILE}`);
   if (sessionSecret() === "dev-insecure-session-secret-change-me") {
     console.warn("警告: 未设置 APP_SESSION_SECRET 环境变量，正在使用不安全的默认密钥。");
     console.warn("      正式部署前请设置一个随机的长字符串作为 APP_SESSION_SECRET。");

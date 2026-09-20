@@ -6,7 +6,7 @@
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { handleApp } from "../functions/handler.mjs";
-import { createFileStore } from "./store.mjs";
+import { createStore } from "./db.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const DATA_FILE = process.env.DATA_FILE || join(ROOT, "data", "store.json");
@@ -19,7 +19,7 @@ if (!username || !password) {
   process.exit(1);
 }
 
-const store = createFileStore(DATA_FILE);
+const { client: store } = await createStore(DATA_FILE);
 const request = new Request("http://localhost/functions/v1/app?action=bootstrap", {
   method: "POST",
   headers: { "content-type": "application/json" },
@@ -33,7 +33,7 @@ const request = new Request("http://localhost/functions/v1/app?action=bootstrap"
 
 const response = await handleApp({ request, supabase: store });
 const text = await response.text();
-await store.flush();
+if (typeof store.flush === "function") await store.flush();
 
 if (response.status === 200) {
   console.log(`已创建管理员账号: ${username}`);
