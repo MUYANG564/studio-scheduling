@@ -25,7 +25,7 @@ export function toDateStr(d: Date): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
-export function upcomingDates(count = 14, base = new Date()): string[] {
+export function upcomingDates(count = 31, base = new Date()): string[] {
   const out: string[] = [];
   for (let i = 0; i < count; i++) {
     const d = new Date(base);

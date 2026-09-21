@@ -3,6 +3,11 @@ import { api } from "../api";
 import type { Notification } from "../types";
 import { cn } from "@/lib/utils";
 
+const KIND_LABEL: Record<string, string> = {
+  announcement: "全站公告",
+  direct_message: "管理员私信",
+};
+
 export function NotificationBell() {
   const [items, setItems] = useState<Notification[]>([]);
   const [open, setOpen] = useState(false);
@@ -62,6 +67,7 @@ export function NotificationBell() {
               <div className="flex items-start gap-2">
                 {!n.read && <span className="mt-1.5 h-2 w-2 shrink-0 rounded-full bg-blue-500" />}
                 <div>
+                  {KIND_LABEL[n.kind] && <p className="mb-1 text-xs font-semibold text-blue-700">{KIND_LABEL[n.kind]}</p>}
                   <p className={cn(!n.read && "font-medium")}>{n.message}</p>
                   <p className="mt-1 text-xs text-muted-foreground">{new Date(n.created_at).toLocaleString("zh-CN")}</p>
                 </div>

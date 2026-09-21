@@ -129,11 +129,47 @@ function resolveBookingAppeal(db, { p_appeal_id: appealId, p_decision: decision 
   return { data: "ok", error: null };
 }
 
+function adminAdjustBooking(db, { p_booking_id: bookingId, p_slots: slots, p_status: status }) {
+  const booking = db.bookings.find((item) => item.id === bookingId);
+  if (!booking) return { data: "not_found", error: null };
+  const conflict = status === "confirmed" && slots.some((key) => {
+    const [date, start] = key.split(" ");
+    return db.slots.some((slot) => slot.studio_id === booking.studio_id && slot.date === date && slot.start === start && slot.status === "locked" && slot.booking_id !== booking.id);
+  });
+  if (conflict) return { data: "slot_conflict", error: null };
+
+  const changedAt = new Date().toISOString();
+  db.slots = db.slots.filter((item) => item.booking_id !== booking.id);
+  if (status === "confirmed") {
+    for (const key of slots) {
+      const [date, start] = key.split(" ");
+      const existing = db.slots.find((slot) => slot.studio_id === booking.studio_id && slot.date === date && slot.start === start);
+      if (existing) Object.assign(existing, { status: "locked", booking_id: booking.id });
+      else db.slots.push({ id: randomUUID(), studio_id: booking.studio_id, date, start, status: "locked", booking_id: booking.id, created_at: changedAt });
+    }
+  }
+  booking.slots = [...new Set(slots)];
+  booking.status = status;
+  if (status === "released") {
+    for (const appeal of db.appeals.filter((item) => item.booking_id === booking.id && item.status === "pending")) {
+      appeal.status = "rejected";
+      appeal.resolved_at = changedAt;
+    }
+  }
+  const message = `后台已调整预约 ${booking.id.slice(0, 8)} 的档期或状态，请进入系统查看最新内容。`;
+  addNotification(db, booking.vendor_account_id, "admin_record_updated", message, changedAt);
+  const studio = db.studios.find((item) => item.id === booking.studio_id);
+  if (studio) addNotification(db, studio.account_id, "admin_record_updated", message, changedAt);
+  return { data: "ok", error: null };
+}
+
 export function createMemoryClient(db) {
   return {
     from: (table) => new QueryBuilder(db, table),
     rpc: (name, args) => name === "resolve_booking_appeal"
       ? resolveBookingAppeal(db, args)
-      : { data: null, error: { message: `unknown rpc: ${name}` } },
+      : name === "admin_adjust_booking"
+        ? adminAdjustBooking(db, args)
+        : { data: null, error: { message: `unknown rpc: ${name}` } },
   };
 }

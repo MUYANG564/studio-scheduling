@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 import { halfHours, upcomingDates, weekday, shortDate, slotKey } from "./slots";
 
@@ -24,12 +24,13 @@ interface DragState {
 export function ScheduleGrid({
   selected, locked, special, counted, onToggle, onBatchChange, dates, times: timeOptions, legend = "studio",
 }: Props) {
-  const dayList = dates ?? upcomingDates(14);
+  const dayList = dates ?? upcomingDates();
   const [active, setActive] = useState(dayList[0]);
   const [preview, setPreview] = useState<Map<string, boolean>>(new Map());
-  const gridRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<DragState | null>(null);
   const skipClickRef = useRef(false);
+  const batchChangeRef = useRef(onBatchChange);
+  batchChangeRef.current = onBatchChange;
   const times = timeOptions ?? halfHours();
 
   const isSelected = (key: string) => preview.get(key) ?? selected.has(key);
@@ -65,12 +66,29 @@ export function ScheduleGrid({
     dragRef.current = null;
     skipClickRef.current = true;
     try {
-      await onBatchChange?.([...drag.keys], drag.selected);
+      await batchChangeRef.current?.([...drag.keys], drag.selected);
     } finally {
       setPreview(new Map());
       window.setTimeout(() => { skipClickRef.current = false; }, 0);
     }
   };
+
+  useEffect(() => {
+    const finish = (event: PointerEvent) => {
+      if (dragRef.current?.pointerId === event.pointerId) void finishDrag();
+    };
+    const cancel = (event: PointerEvent) => {
+      if (dragRef.current?.pointerId !== event.pointerId) return;
+      dragRef.current = null;
+      setPreview(new Map());
+    };
+    window.addEventListener("pointerup", finish);
+    window.addEventListener("pointercancel", cancel);
+    return () => {
+      window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", cancel);
+    };
+  }, []);
 
   return (
     <div className="flex flex-col gap-4">
@@ -99,7 +117,7 @@ export function ScheduleGrid({
         })}
       </div>
 
-      <div ref={gridRef} className={cn("grid grid-cols-3 gap-2 sm:grid-cols-4 md:grid-cols-6", onBatchChange && "touch-none select-none")}>
+      <div className={cn("grid grid-cols-3 gap-2 sm:grid-cols-4 md:grid-cols-6", onBatchChange && "touch-none select-none")}>
         {times.map((time) => {
           const key = slotKey(active, time);
           const isLocked = locked?.has(key);
@@ -113,27 +131,13 @@ export function ScheduleGrid({
               onPointerDown={onBatchChange ? (event) => {
                 const nextSelected = !isOn;
                 dragRef.current = { pointerId: event.pointerId, selected: nextSelected, anchorKey: key, keys: new Set() };
-                event.currentTarget.setPointerCapture(event.pointerId);
                 addDragKey(key);
                 event.preventDefault();
               } : undefined}
-              onPointerMove={onBatchChange ? (event) => {
+              onPointerEnter={onBatchChange ? (event) => {
                 if (dragRef.current?.pointerId !== event.pointerId) return;
-                const element = document.elementFromPoint(event.clientX, event.clientY)?.closest<HTMLElement>("[data-slot-key]");
-                const hoveredKey = element?.dataset.slotKey;
-                if (hoveredKey && gridRef.current?.contains(element)) addDragKey(hoveredKey);
+                addDragKey(key);
                 event.preventDefault();
-              } : undefined}
-              onPointerUp={onBatchChange ? (event) => {
-                if (dragRef.current?.pointerId !== event.pointerId) return;
-                const element = document.elementFromPoint(event.clientX, event.clientY)?.closest<HTMLElement>("[data-slot-key]");
-                const hoveredKey = element?.dataset.slotKey;
-                if (hoveredKey && gridRef.current?.contains(element)) addDragKey(hoveredKey);
-                void finishDrag();
-              } : undefined}
-              onPointerCancel={onBatchChange ? () => {
-                dragRef.current = null;
-                setPreview(new Map());
               } : undefined}
               onClick={() => {
                 if (skipClickRef.current) return;

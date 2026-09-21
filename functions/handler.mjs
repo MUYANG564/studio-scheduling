@@ -2,9 +2,13 @@
 // Single Function entry: routes by ?action= and HTTP method. All authorization
 // is enforced here. The browser never talks to the database directly.
 import { hashPassword, verifyPassword, signToken, verifyToken, sessionSecret } from "./authlib.mjs";
+import { renderBackupMarkdown } from "./backup.mjs";
+import { createDingTalkClient, DingTalkError } from "./dingtalk.mjs";
 import {
   computeMatches, isWithinBusinessHours, normalizeBusinessHours, slotKey,
 } from "./matching.mjs";
+
+const dingTalkClient = createDingTalkClient();
 
 const json = (body, status = 200, headers = {}) =>
   Response.json(body, { status, headers: { "cache-control": "no-store", ...headers } });
@@ -87,9 +91,14 @@ async function studioForAccount(supabase, accountId) {
   return data ?? null;
 }
 async function listAll(supabase, table, order = "created_at") {
-  const { data, error } = await supabase.from(table).select("*").order(order, { ascending: true });
-  if (error || !Array.isArray(data)) throw new HttpError("database_request_failed", 503);
-  return data;
+  const rows = [];
+  for (let offset = 0; ; offset += 1000) {
+    const { data, error } = await supabase.from(table).select("*")
+      .order(order, { ascending: true }).range(offset, offset + 999);
+    if (error || !Array.isArray(data)) throw new HttpError("database_request_failed", 503);
+    rows.push(...data);
+    if (data.length < 1000) return rows;
+  }
 }
 async function cityOptions(supabase) {
   const studios = await listAll(supabase, "studios");
@@ -148,7 +157,7 @@ function requireRole(account, ...roles) {
 }
 
 // ---- main dispatch ----
-export async function handleApp({ request, supabase }) {
+export async function handleApp({ request, supabase, dingtalk = dingTalkClient }) {
   const url = new URL(request.url);
   const action = url.searchParams.get("action");
   try {
@@ -158,11 +167,16 @@ export async function handleApp({ request, supabase }) {
       case "me": return await me(request, supabase);
       case "notifications": return await getNotifications(request, supabase);
       case "notifications/read": return await readNotification(request, supabase);
+      case "backup/dingtalk": return await exportDingTalkBackup(request, supabase, dingtalk);
       // admin
       case "admin/overview": return await adminOverview(request, supabase);
       case "admin/create-account": return await adminCreateAccount(request, supabase);
       case "admin/delete-account": return await adminDeleteAccount(request, supabase);
       case "admin/note": return await adminNote(request, supabase);
+      case "admin/update-record": return await adminUpdateRecord(request, supabase);
+      case "admin/slots/set": return await adminSlotsSet(request, supabase);
+      case "admin/broadcast": return await adminBroadcast(request, supabase);
+      case "admin/message": return await adminMessage(request, supabase);
       case "admin/city-proximity/save": return await adminSaveCityProximity(request, supabase);
       case "admin/city-proximity/delete": return await adminDeleteCityProximity(request, supabase);
       case "admin/resolve-appeal": return await adminResolveAppeal(request, supabase);
@@ -255,6 +269,133 @@ async function readNotification(request, supabase) {
   if (!str(body.id, 64)) throw new HttpError("invalid_body", 400);
   await supabase.from("notifications").update({ read: true }).eq("id", body.id).eq("account_id", account.id);
   return json({ ok: true });
+}
+
+const safeAccount = (account, includeAdminNote = false) => ({
+  ...publicAccount(account),
+  ...(includeAdminNote ? { admin_note: account.admin_note ?? "" } : {}),
+  created_at: account.created_at,
+});
+
+async function rowsFor(supabase, table, column, value) {
+  const rows = [];
+  for (let offset = 0; ; offset += 1000) {
+    const { data, error } = await supabase.from(table).select("*")
+      .eq(column, value).order("created_at", { ascending: true }).range(offset, offset + 999);
+    if (error || !Array.isArray(data)) throw new HttpError("database_request_failed", 503);
+    rows.push(...data);
+    if (data.length < 1000) return rows;
+  }
+}
+
+async function backupSections(supabase, account) {
+  if (account.role === "admin") {
+    const [accounts, studios, speakers, slots, requests, bookings, appeals, notifications, proximities] = await Promise.all([
+      listAll(supabase, "accounts"),
+      listAll(supabase, "studios"),
+      listAll(supabase, "speakers"),
+      listAll(supabase, "slots"),
+      listAll(supabase, "schedule_requests"),
+      listAll(supabase, "bookings"),
+      listAll(supabase, "appeals"),
+      listAll(supabase, "notifications"),
+      listAll(supabase, "city_proximities"),
+    ]);
+    return [
+      { key: "accounts", title: "账号", rows: accounts.map((item) => safeAccount(item, true)) },
+      { key: "studios", title: "录音棚", rows: studios },
+      { key: "speakers", title: "项目与发音人", rows: speakers },
+      { key: "slots", title: "档期例外与锁定记录", rows: slots },
+      { key: "requests", title: "排期需求", rows: requests },
+      { key: "bookings", title: "预约", rows: bookings },
+      { key: "appeals", title: "申诉", rows: appeals },
+      { key: "notifications", title: "站内通知", rows: notifications },
+      { key: "city_proximities", title: "邻近城市", rows: proximities },
+    ];
+  }
+
+  const notifications = await rowsFor(supabase, "notifications", "account_id", account.id);
+  if (account.role === "studio") {
+    const studio = await studioForAccount(supabase, account.id);
+    if (!studio) throw new HttpError("needs_setup", 409);
+    const [slots, bookings, speakers, appeals] = await Promise.all([
+      rowsFor(supabase, "slots", "studio_id", studio.id),
+      rowsFor(supabase, "bookings", "studio_id", studio.id),
+      listAll(supabase, "speakers"),
+      listAll(supabase, "appeals"),
+    ]);
+    const speakerById = new Map(speakers.map((item) => [item.id, item]));
+    const bookingIds = new Set(bookings.map((item) => item.id));
+    return [
+      { key: "accounts", title: "账号资料", rows: [safeAccount(account)] },
+      { key: "studios", title: "录音棚资料与营业时间", rows: [{ ...studio, admin_note: undefined }] },
+      { key: "slots", title: "档期例外与锁定记录", rows: slots },
+      {
+        key: "bookings",
+        title: "预约",
+        rows: bookings.map((item) => ({
+          ...item,
+          project_name: speakerById.get(item.speaker_id)?.project_name ?? "",
+          stage_name: speakerById.get(item.speaker_id)?.stage_name ?? "",
+          vendor_account_id: undefined,
+        })),
+      },
+      { key: "appeals", title: "相关申诉", rows: appeals.filter((item) => bookingIds.has(item.booking_id)).map((item) => ({ ...item, vendor_account_id: undefined })) },
+      { key: "notifications", title: "站内通知", rows: notifications },
+    ];
+  }
+
+  const [speakers, requests, bookings, studios, appeals] = await Promise.all([
+    rowsFor(supabase, "speakers", "vendor_account_id", account.id),
+    rowsFor(supabase, "schedule_requests", "vendor_account_id", account.id),
+    rowsFor(supabase, "bookings", "vendor_account_id", account.id),
+    listAll(supabase, "studios"),
+    listAll(supabase, "appeals"),
+  ]);
+  const studioById = new Map(studios.map((item) => [item.id, item]));
+  const speakerById = new Map(speakers.map((item) => [item.id, item]));
+  const bookingIds = new Set(bookings.map((item) => item.id));
+  return [
+    { key: "accounts", title: "账号资料", rows: [safeAccount(account)] },
+    { key: "speakers", title: "项目与发音人", rows: speakers.map((item) => ({ ...item, admin_note: undefined })) },
+    { key: "requests", title: "排期需求", rows: requests },
+    {
+      key: "bookings",
+      title: "预约",
+      rows: bookings.map((item) => ({
+        ...item,
+        studio_name: studioById.get(item.studio_id)?.name ?? "",
+        project_name: speakerById.get(item.speaker_id)?.project_name ?? "",
+        stage_name: speakerById.get(item.speaker_id)?.stage_name ?? "",
+      })),
+    },
+    { key: "studios", title: "预约涉及的录音棚", rows: [...new Set(bookings.map((item) => item.studio_id))].map((id) => studioById.get(id)).filter(Boolean).map((item) => ({ id: item.id, name: item.name, city: item.city, address: item.address })) },
+    { key: "appeals", title: "相关申诉", rows: appeals.filter((item) => bookingIds.has(item.booking_id)).map((item) => ({ ...item, studio_id: undefined })) },
+    { key: "notifications", title: "站内通知", rows: notifications },
+  ];
+}
+
+async function exportDingTalkBackup(request, supabase, dingtalk) {
+  requireMethod(request, "POST");
+  const account = await authenticate(request, supabase);
+  const generatedAt = NOW();
+  const roleLabel = { admin: "后台全站", studio: "录音棚", vendor: "供应商" }[account.role];
+  const title = `录音棚档期匹配平台·${roleLabel}数据备份·${generatedAt.slice(0, 10)}`;
+  const content = renderBackupMarkdown({
+    title,
+    account: publicAccount(account),
+    generatedAt,
+    sections: await backupSections(supabase, account),
+  });
+  try {
+    const document = await dingtalk.createDocument({ title, content });
+    return json({ ok: true, url: document.url, document_id: document.documentId });
+  } catch (error) {
+    if (error instanceof DingTalkError && error.code === "dingtalk_not_configured") {
+      throw new HttpError("dingtalk_not_configured", 503);
+    }
+    throw new HttpError("dingtalk_export_failed", 502);
+  }
 }
 
 // ---- admin ----
@@ -355,6 +496,165 @@ async function adminNote(request, supabase) {
   if (!table || !str(body.target_id, 64) || !optStr(body.admin_note, 2000)) throw new HttpError("invalid_body", 400);
   const { error } = await supabase.from(table).update({ admin_note: body.admin_note ?? "" }).eq("id", body.target_id);
   if (error) throw new HttpError("database_request_failed", 503);
+  return json({ ok: true });
+}
+
+async function adminUpdateRecord(request, supabase) {
+  requireMethod(request, "POST");
+  const account = await authenticate(request, supabase);
+  requireRole(account, "admin");
+  const body = await readJson(request);
+  if (!str(body.target_id, 64) || !body.changes || typeof body.changes !== "object" || Array.isArray(body.changes)) {
+    throw new HttpError("invalid_body", 400);
+  }
+
+  const changes = body.changes;
+  const hasOnlyChanges = (...allowed) => Object.keys(changes).every((key) => allowed.includes(key));
+  let recipientId;
+  let subject;
+
+  if (body.target_type === "account") {
+    const target = await findAccountById(supabase, body.target_id);
+    if (!hasOnlyChanges("username", "display_name", "email", "password") || !target || !str(changes.username, 64) || !optStr(changes.display_name, 128) || !optStr(changes.email, 256) || !optStr(changes.password, 256)) {
+      throw new HttpError("invalid_body", 400);
+    }
+    if (changes.password && changes.password.length < 6) throw new HttpError("invalid_body", 400);
+    const patch = {
+      username: changes.username.trim(),
+      display_name: changes.display_name?.trim() ?? "",
+      email: changes.email?.trim() ?? "",
+    };
+    if (changes.password) patch.password_hash = await hashPassword(changes.password);
+    const { error } = await supabase.from("accounts").update(patch).eq("id", target.id);
+    if (error) throw new HttpError("database_request_failed", 503);
+    recipientId = target.id;
+    subject = `账号 ${patch.username}`;
+  } else if (body.target_type === "studio") {
+    const target = await findStudioById(supabase, body.target_id);
+    if (!hasOnlyChanges("name", "city", "address", "email") || !target || !str(changes.name, 128) || !str(normalizeCity(changes.city), 64) || !str(changes.address, 256) || !optStr(changes.email, 256)) {
+      throw new HttpError("invalid_body", 400);
+    }
+    const patch = {
+      name: changes.name.trim(), city: normalizeCity(changes.city), address: changes.address.trim(), email: changes.email?.trim() ?? "",
+    };
+    const { error } = await supabase.from("studios").update(patch).eq("id", target.id);
+    if (error) throw new HttpError("database_request_failed", 503);
+    recipientId = target.account_id;
+    subject = `录音棚 ${patch.name}`;
+  } else if (body.target_type === "speaker") {
+    const { data: target } = await supabase.from("speakers").select("*").eq("id", body.target_id).maybeSingle();
+    if (!hasOnlyChanges("project_name", "stage_name", "email") || !target || !str(changes.project_name, 128) || !str(changes.stage_name, 128) || !optStr(changes.email, 256)) {
+      throw new HttpError("invalid_body", 400);
+    }
+    const patch = {
+      project_name: changes.project_name.trim(), stage_name: changes.stage_name.trim(), email: changes.email?.trim() ?? "",
+    };
+    const { error } = await supabase.from("speakers").update(patch).eq("id", target.id);
+    if (error) throw new HttpError("database_request_failed", 503);
+    recipientId = target.vendor_account_id;
+    subject = `项目 ${patch.project_name} · ${patch.stage_name}`;
+  } else if (body.target_type === "request") {
+    const { data: target } = await supabase.from("schedule_requests").select("*").eq("id", body.target_id).maybeSingle();
+    if (!hasOnlyChanges("slots", "preferred_cities", "match_mode", "status") || !target || !["open", "reopened", "closed"].includes(changes.status)) throw new HttpError("invalid_body", 400);
+    const desired = validateDesired(changes.slots);
+    const { preferredCities, matchMode } = await requestPreferences(supabase, changes.preferred_cities, changes.match_mode);
+    const { error } = await supabase.from("schedule_requests").update({
+      desired, preferred_cities: preferredCities, match_mode: matchMode, status: changes.status,
+    }).eq("id", target.id);
+    if (error) throw new HttpError("database_request_failed", 503);
+    recipientId = target.vendor_account_id;
+    subject = `排期需求 ${target.id.slice(0, 8)}`;
+  } else if (body.target_type === "booking") {
+    if (!hasOnlyChanges("slots", "status")) throw new HttpError("invalid_body", 400);
+    const slots = validateDesired(changes.slots);
+    if (!["confirmed", "released"].includes(changes.status)) throw new HttpError("invalid_body", 400);
+    const { data, error } = await supabase.rpc("admin_adjust_booking", {
+      p_booking_id: body.target_id,
+      p_slots: slots,
+      p_status: changes.status,
+    });
+    if (error) {
+      if (String(error.message ?? "").includes("slot_conflict")) throw new HttpError("slot_conflict", 409);
+      throw new HttpError("database_request_failed", 503);
+    }
+    if (data !== "ok") throw new HttpError(data === "slot_conflict" ? "slot_conflict" : "not_found", data === "slot_conflict" ? 409 : 404);
+    return json({ ok: true });
+  } else {
+    throw new HttpError("invalid_body", 400);
+  }
+
+  await notify(supabase, recipientId, "admin_record_updated", `后台已调整${subject}的资料，请进入系统查看最新内容。`);
+  return json({ ok: true });
+}
+
+async function adminSlotsSet(request, supabase) {
+  requireMethod(request, "POST");
+  const account = await authenticate(request, supabase);
+  requireRole(account, "admin");
+  const body = await readJson(request);
+  if (!str(body.studio_id, 64)) throw new HttpError("invalid_body", 400);
+  const studio = await findStudioById(supabase, body.studio_id);
+  if (!studio) throw new HttpError("not_found", 404);
+  const changes = Array.isArray(body.slots) ? body.slots : [];
+  if (changes.length === 0 || changes.length > 500) throw new HttpError("invalid_body", 400);
+  for (const change of changes) {
+    if (!isDate(change.date) || !isHalfHour(change.start) || typeof change.available !== "boolean") throw new HttpError("invalid_body", 400);
+  }
+  const skipped = [];
+  for (const change of changes) {
+    const { data: existing } = await supabase.from("slots").select("*")
+      .eq("studio_id", studio.id).eq("date", change.date).eq("start", change.start).maybeSingle();
+    if (existing?.status === "locked") {
+      skipped.push({ date: change.date, start: change.start });
+      continue;
+    }
+    const regular = isWithinBusinessHours(studio.business_hours, change.date, change.start);
+    const needsOverride = change.available !== regular;
+    if (!needsOverride) {
+      if (existing) await supabase.from("slots").delete().eq("id", existing.id);
+    } else if (existing) {
+      await supabase.from("slots").update({ status: change.available ? "free" : "blocked", booking_id: null }).eq("id", existing.id);
+    } else {
+      await supabase.from("slots").insert({
+        id: uuid(), studio_id: studio.id, date: change.date, start: change.start,
+        status: change.available ? "free" : "blocked", booking_id: null, created_at: NOW(),
+      });
+    }
+  }
+  await notify(supabase, studio.account_id, "admin_record_updated", `后台已调整录音棚 ${studio.name} 的档期，请进入系统查看最新内容。`);
+  return json({ ok: true, skipped });
+}
+
+async function adminBroadcast(request, supabase) {
+  requireMethod(request, "POST");
+  const account = await authenticate(request, supabase);
+  requireRole(account, "admin");
+  const body = await readJson(request);
+  if (!str(body.message, 2000) || !body.message.trim()) throw new HttpError("invalid_body", 400);
+  const accounts = await listAll(supabase, "accounts");
+  const createdAt = NOW();
+  const rows = accounts.map((item) => ({
+    id: uuid(), account_id: item.id, kind: "announcement",
+    message: `全站公告：${body.message.trim()}`, read: false, created_at: createdAt,
+  }));
+  if (rows.length > 0) {
+    const { error: insertError } = await supabase.from("notifications").insert(rows);
+    if (insertError) throw new HttpError("database_request_failed", 503);
+  }
+  return json({ ok: true, recipient_count: rows.length });
+}
+
+async function adminMessage(request, supabase) {
+  requireMethod(request, "POST");
+  const account = await authenticate(request, supabase);
+  requireRole(account, "admin");
+  const body = await readJson(request);
+  if (!str(body.account_id, 64) || !str(body.message, 2000) || !body.message.trim()) {
+    throw new HttpError("invalid_body", 400);
+  }
+  const target = await findAccountById(supabase, body.account_id);
+  if (!target) throw new HttpError("not_found", 404);
+  await notify(supabase, target.id, "direct_message", `管理员私信：${body.message.trim()}`);
   return json({ ok: true });
 }
 

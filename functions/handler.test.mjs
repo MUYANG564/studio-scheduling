@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { createMemoryClient } from "../dev/memory-supabase.mjs";
 import { createFileStore } from "../server/store.mjs";
 import { signToken } from "./authlib.mjs";
+import { DingTalkError } from "./dingtalk.mjs";
 import { handleApp } from "./handler.mjs";
 
 const TEST_SECRET = "booking-appeal-test-secret";
@@ -46,7 +47,7 @@ function makeDb() {
   };
 }
 
-async function callWithClient(supabase, action, accountId, body, method = "POST") {
+async function callWithClient(supabase, action, accountId, body, method = "POST", dingtalk) {
   const token = await signToken(TEST_SECRET, {
     sub: accountId,
     exp: Math.floor(Date.now() / 1000) + 3600,
@@ -56,12 +57,12 @@ async function callWithClient(supabase, action, accountId, body, method = "POST"
     headers: { "content-type": "application/json", "x-session-token": token },
     body: method === "GET" ? undefined : JSON.stringify(body ?? {}),
   });
-  const response = await handleApp({ request, supabase });
+  const response = await handleApp({ request, supabase, dingtalk });
   return { status: response.status, body: await response.json() };
 }
 
-async function call(db, action, accountId, body, method = "POST") {
-  return callWithClient(createMemoryClient(db), action, accountId, body, method);
+async function call(db, action, accountId, body, method = "POST", dingtalk) {
+  return callWithClient(createMemoryClient(db), action, accountId, body, method, dingtalk);
 }
 
 test("vendor appeal is owner-only, visible on both booking lists, and blocks a second pending appeal", async () => {
@@ -220,4 +221,147 @@ test("email is optional for account creation, studio setup, and speaker creation
     project_name: "新项目", stage_name: "新角色", email: "x".repeat(257),
   });
   assert.equal(tooLong.status, 400);
+});
+
+test("admin updates business records and notifies their owners", async () => {
+  const db = makeDb();
+
+  const forbidden = await call(db, "admin/update-record", "vendor-account", {
+    target_type: "studio", target_id: "studio-id", changes: { name: "越权修改", city: "上海", address: "地址", email: "" },
+  });
+  assert.equal(forbidden.status, 403);
+
+  const studio = await call(db, "admin/update-record", "admin-account", {
+    target_type: "studio", target_id: "studio-id",
+    changes: { name: "调整后的录音棚", city: "杭州", address: "新地址", email: "studio@example.com" },
+  });
+  assert.equal(studio.status, 200);
+  assert.equal(db.studios[0].name, "调整后的录音棚");
+  assert.equal(db.notifications.at(-1).account_id, "studio-account");
+  assert.equal(db.notifications.at(-1).kind, "admin_record_updated");
+
+  const speaker = await call(db, "admin/update-record", "admin-account", {
+    target_type: "speaker", target_id: "speaker-id",
+    changes: { project_name: "调整后的项目", stage_name: "新角色", email: "vendor@example.com" },
+  });
+  assert.equal(speaker.status, 200);
+  assert.equal(db.speakers[0].stage_name, "新角色");
+  assert.equal(db.notifications.at(-1).account_id, "vendor-account");
+
+  const request = await call(db, "admin/update-record", "admin-account", {
+    target_type: "request", target_id: "request-id",
+    changes: {
+      slots: [{ date: "2026-09-28", start: "10:30" }],
+      preferred_cities: ["杭州"], match_mode: "location_first", status: "reopened",
+    },
+  });
+  assert.equal(request.status, 200);
+  assert.deepEqual(db.schedule_requests[0].desired, ["2026-09-28 10:30"]);
+  assert.equal(db.schedule_requests[0].status, "reopened");
+  assert.equal(db.notifications.at(-1).account_id, "vendor-account");
+});
+
+test("admin adjusts booking slots atomically and notifies both sides", async () => {
+  const db = makeDb();
+  const result = await call(db, "admin/update-record", "admin-account", {
+    target_type: "booking", target_id: "booking-id",
+    changes: {
+      slots: [
+        { date: "2026-09-27", start: "13:00" },
+        { date: "2026-09-27", start: "13:30" },
+      ],
+      status: "confirmed",
+    },
+  });
+
+  assert.equal(result.status, 200);
+  assert.deepEqual(db.bookings[0].slots, ["2026-09-27 13:00", "2026-09-27 13:30"]);
+  assert.deepEqual(db.slots.map((slot) => `${slot.date} ${slot.start}`), ["2026-09-27 13:00", "2026-09-27 13:30"]);
+  assert.deepEqual(new Set(db.notifications.map((item) => item.account_id)), new Set(["vendor-account", "studio-account"]));
+});
+
+test("admin availability changes preserve locked bookings and notify the studio", async () => {
+  const db = makeDb();
+  const result = await call(db, "admin/slots/set", "admin-account", {
+    studio_id: "studio-id",
+    slots: [
+      { date: "2026-09-25", start: "09:00", available: false },
+      { date: "2026-09-26", start: "10:00", available: false },
+    ],
+  });
+
+  assert.equal(result.status, 200);
+  assert.deepEqual(result.body.skipped, [{ date: "2026-09-25", start: "09:00" }]);
+  assert.equal(db.slots.find((slot) => slot.date === "2026-09-25").status, "locked");
+  assert.equal(db.slots.find((slot) => slot.date === "2026-09-26").status, "blocked");
+  assert.equal(db.notifications.at(-1).account_id, "studio-account");
+});
+
+test("DingTalk backups are role-scoped and never include password hashes", async () => {
+  const db = makeDb();
+  db.accounts[0].password_hash = "must-not-leak";
+  db.accounts[3].display_name = "不可见的其他供应商";
+  db.speakers[0].stage_name = "<测试角色>";
+  const captured = [];
+  const dingtalk = {
+    async createDocument(input) {
+      captured.push(input);
+      return { documentId: `doc-${captured.length}`, url: `https://docs.dingtalk.com/doc-${captured.length}` };
+    },
+  };
+
+  const admin = await call(db, "backup/dingtalk", "admin-account", {}, "POST", dingtalk);
+  assert.equal(admin.status, 200);
+  assert.match(captured[0].content, /不可见的其他供应商/);
+  assert.doesNotMatch(captured[0].content, /must-not-leak/);
+
+  const vendor = await call(db, "backup/dingtalk", "vendor-account", {}, "POST", dingtalk);
+  assert.equal(vendor.status, 200);
+  assert.match(captured[1].content, /测试项目/);
+  assert.match(captured[1].content, /&lt;测试角色&gt;/);
+  assert.match(captured[1].content, /测试录音棚/);
+  assert.doesNotMatch(captured[1].content, /不可见的其他供应商/);
+
+  const studio = await call(db, "backup/dingtalk", "studio-account", {}, "POST", dingtalk);
+  assert.equal(studio.status, 200);
+  assert.match(captured[2].content, /测试录音棚/);
+  assert.match(captured[2].content, /测试项目/);
+  assert.doesNotMatch(captured[2].content, /不可见的其他供应商/);
+});
+
+test("DingTalk backup reports missing server configuration", async () => {
+  const db = makeDb();
+  const result = await call(db, "backup/dingtalk", "vendor-account", {}, "POST", {
+    async createDocument() {
+      throw new DingTalkError("dingtalk_not_configured");
+    },
+  });
+  assert.equal(result.status, 503);
+  assert.equal(result.body.error, "dingtalk_not_configured");
+});
+
+test("only admins can broadcast announcements and send account messages", async () => {
+  const db = makeDb();
+  const forbidden = await call(db, "admin/broadcast", "vendor-account", { message: "越权公告" });
+  assert.equal(forbidden.status, 403);
+  assert.equal(db.notifications.length, 0);
+
+  const broadcast = await call(db, "admin/broadcast", "admin-account", { message: "今晚维护" });
+  assert.equal(broadcast.status, 200);
+  assert.equal(broadcast.body.recipient_count, db.accounts.length);
+  assert.equal(db.notifications.length, db.accounts.length);
+  assert.ok(db.notifications.every((item) => item.kind === "announcement" && item.message === "全站公告：今晚维护"));
+
+  const direct = await call(db, "admin/message", "admin-account", {
+    account_id: "studio-account", message: "请更新本周档期",
+  });
+  assert.equal(direct.status, 200);
+  assert.equal(db.notifications.at(-1).account_id, "studio-account");
+  assert.equal(db.notifications.at(-1).kind, "direct_message");
+  assert.equal(db.notifications.at(-1).message, "管理员私信：请更新本周档期");
+
+  const missing = await call(db, "admin/message", "admin-account", {
+    account_id: "missing-account", message: "测试",
+  });
+  assert.equal(missing.status, 404);
 });

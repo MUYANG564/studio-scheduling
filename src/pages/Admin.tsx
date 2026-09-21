@@ -2,7 +2,13 @@ import { useEffect, useMemo, useState } from "react";
 import { api, ApiError } from "../api";
 import type { Account, Appeal, Booking, CityProximity, ScheduleRequest, Slot, Speaker, Studio } from "../types";
 import { Button, Card, EmptyState, Field, Input, SectionTitle, Badge, Spinner, Textarea } from "../ui";
+import { BackupButton } from "../BackupButton";
 import { SlotChips } from "./Studio";
+import { ScheduleGrid } from "../ScheduleGrid";
+import {
+  ALL_DAY_END, ALL_DAY_START, halfHours, isWithinBusinessHours, parseKey, slotKey, upcomingDates,
+} from "../slots";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 
 interface Overview {
@@ -20,7 +26,9 @@ const TABS = [
   ["appeals", "申诉审批"],
   ["studios", "录音棚"],
   ["speakers", "发音人"],
+  ["requests", "排期需求"],
   ["bookings", "预约总览"],
+  ["messages", "消息发布"],
   ["cities", "邻近城市"],
   ["accounts", "账号管理"],
 ] as const;
@@ -41,6 +49,17 @@ export function AdminDashboard() {
 
   return (
     <div className="flex flex-col gap-5">
+      <Card className="border-0 bg-gradient-to-br from-slate-950 via-slate-900 to-indigo-950 text-white shadow-xl">
+        <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
+          <div>
+            <p className="text-sm text-indigo-200">后台管理工作台</p>
+            <h1 className="mt-1 text-2xl font-semibold">全站业务记录</h1>
+            <p className="mt-2 text-sm text-slate-300">可随时将当前全站记录备份到钉钉文档。</p>
+          </div>
+          <BackupButton className="border-white/20 bg-white/10 text-white hover:bg-white/20" />
+        </div>
+      </Card>
+
       <div className="flex flex-wrap gap-2">
         {TABS.map(([id, label]) => (
           <button
@@ -62,7 +81,9 @@ export function AdminDashboard() {
       {tab === "appeals" && <AppealsTab data={data} onChanged={reload} />}
       {tab === "studios" && <StudiosTab data={data} onChanged={reload} />}
       {tab === "speakers" && <SpeakersTab data={data} onChanged={reload} />}
-      {tab === "bookings" && <BookingsTab data={data} />}
+      {tab === "requests" && <RequestsTab data={data} onChanged={reload} />}
+      {tab === "bookings" && <BookingsTab data={data} onChanged={reload} />}
+      {tab === "messages" && <MessagesTab accounts={data.accounts} />}
       {tab === "cities" && <CityProximitiesTab data={data} onChanged={reload} />}
       {tab === "accounts" && <AccountsTab data={data} onChanged={reload} />}
     </div>
@@ -164,8 +185,24 @@ function StudiosTab({ data, onChanged }: { data: Overview; onChanged: () => void
                 <p className="font-medium">{s.name} <Badge tone="blue">{s.city}</Badge></p>
                 <p className="text-sm text-muted-foreground">{s.address} · {s.email}</p>
               </div>
-              <div className="text-right text-sm text-muted-foreground">
-                空闲 <b className="text-emerald-600">{c.free}</b> · 锁定 <b className="text-amber-600">{c.locked}</b>
+              <div className="flex items-center gap-2">
+                <div className="text-right text-sm text-muted-foreground">
+                  空闲 <b className="text-emerald-600">{c.free}</b> · 锁定 <b className="text-amber-600">{c.locked}</b>
+                </div>
+                <RecordEditor
+                  targetType="studio"
+                  targetId={s.id}
+                  title={`调整录音棚：${s.name}`}
+                  initial={{ name: s.name, city: s.city, address: s.address, email: s.email }}
+                  fields={[
+                    { key: "name", label: "录音棚名称", required: true },
+                    { key: "city", label: "所在城市", required: true },
+                    { key: "address", label: "详细地址", required: true },
+                    { key: "email", label: "联系邮箱", type: "email" },
+                  ]}
+                  onSaved={onChanged}
+                />
+                <AdminScheduleEditor studio={s} slots={data.slots} onSaved={onChanged} />
               </div>
             </div>
             <AdminNote targetType="studio" targetId={s.id} value={s.admin_note ?? ""} onSaved={onChanged} />
@@ -182,8 +219,24 @@ function SpeakersTab({ data, onChanged }: { data: Overview; onChanged: () => voi
     <div className="flex flex-col gap-3">
       {data.speakers.map((s) => (
         <Card key={s.id}>
-          <p className="font-medium">{s.project_name} · {s.stage_name}</p>
-          <p className="text-sm text-muted-foreground">{s.email}</p>
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <p className="font-medium">{s.project_name} · {s.stage_name}</p>
+              <p className="text-sm text-muted-foreground">{s.email}</p>
+            </div>
+            <RecordEditor
+              targetType="speaker"
+              targetId={s.id}
+              title={`调整项目：${s.project_name}`}
+              initial={{ project_name: s.project_name, stage_name: s.stage_name, email: s.email }}
+              fields={[
+                { key: "project_name", label: "项目名称", required: true },
+                { key: "stage_name", label: "发音人艺名 / 姓名", required: true },
+                { key: "email", label: "联系邮箱", type: "email" },
+              ]}
+              onSaved={onChanged}
+            />
+          </div>
           <AdminNote targetType="speaker" targetId={s.id} value={s.admin_note ?? ""} onSaved={onChanged} />
         </Card>
       ))}
@@ -191,7 +244,53 @@ function SpeakersTab({ data, onChanged }: { data: Overview; onChanged: () => voi
   );
 }
 
-function BookingsTab({ data }: { data: Overview }) {
+function RequestsTab({ data, onChanged }: { data: Overview; onChanged: () => void }) {
+  const speakerById = useMemo(() => new Map(data.speakers.map((speaker) => [speaker.id, speaker])), [data.speakers]);
+  if (data.requests.length === 0) return <EmptyState>暂无排期需求。</EmptyState>;
+  return (
+    <div className="flex flex-col gap-3">
+      {data.requests.map((request) => {
+        const speaker = speakerById.get(request.speaker_id);
+        return (
+          <Card key={request.id}>
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="font-medium">{speaker?.project_name ?? "已删除项目"} · {speaker?.stage_name ?? "未知发音人"}</p>
+                <p className="text-sm text-muted-foreground">
+                  意向城市：{request.preferred_cities?.join("、") || "无"} · {request.match_mode === "location_first" ? "地区优先" : "档期优先"}
+                </p>
+                <SlotChips keys={request.desired} />
+              </div>
+              <div className="flex items-center gap-2">
+                <Badge tone={request.status === "closed" ? "gray" : "blue"}>{request.status}</Badge>
+                <RecordEditor
+                  targetType="request"
+                  targetId={request.id}
+                  title={`调整排期需求：${request.id.slice(0, 8)}`}
+                  initial={{
+                    slots: request.desired.join("\n"),
+                    preferred_cities: request.preferred_cities?.join("、") ?? "",
+                    match_mode: request.match_mode ?? "schedule_first",
+                    status: request.status,
+                  }}
+                  fields={[
+                    { key: "slots", label: "期望档期", type: "textarea", required: true, hint: "每行一个，格式：2026-09-30 09:30" },
+                    { key: "preferred_cities", label: "意向城市", hint: "多个城市用顿号或逗号分隔" },
+                    { key: "match_mode", label: "P2 模式", type: "select", options: [["schedule_first", "档期优先"], ["location_first", "地区优先"]] },
+                    { key: "status", label: "状态", type: "select", options: [["open", "待预约"], ["reopened", "已重开"], ["closed", "已关闭"]] },
+                  ]}
+                  onSaved={onChanged}
+                />
+              </div>
+            </div>
+          </Card>
+        );
+      })}
+    </div>
+  );
+}
+
+function BookingsTab({ data, onChanged }: { data: Overview; onChanged: () => void }) {
   const studioById = useMemo(() => new Map(data.studios.map((s) => [s.id, s])), [data.studios]);
   const speakerById = useMemo(() => new Map(data.speakers.map((s) => [s.id, s])), [data.speakers]);
   if (data.bookings.length === 0) return <EmptyState>暂无预约。</EmptyState>;
@@ -202,12 +301,27 @@ function BookingsTab({ data }: { data: Overview }) {
         const speaker = speakerById.get(b.speaker_id);
         return (
           <Card key={b.id}>
-            <div className="flex items-center justify-between">
-              <p className="font-medium">{speaker?.project_name} · {speaker?.stage_name}</p>
-              <Badge tone={b.status === "confirmed" ? "green" : "gray"}>{b.status === "confirmed" ? "已确认" : "已释放"}</Badge>
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="font-medium">{speaker?.project_name} · {speaker?.stage_name}</p>
+                <p className="text-sm text-muted-foreground">{studio?.name} · {studio?.city} · {studio?.address}</p>
+                <SlotChips keys={b.slots} />
+              </div>
+              <div className="flex items-center gap-2">
+                <Badge tone={b.status === "confirmed" ? "green" : "gray"}>{b.status === "confirmed" ? "已确认" : "已释放"}</Badge>
+                <RecordEditor
+                  targetType="booking"
+                  targetId={b.id}
+                  title={`调整预约：${b.id.slice(0, 8)}`}
+                  initial={{ slots: b.slots.join("\n"), status: b.status }}
+                  fields={[
+                    { key: "slots", label: "预约档期", type: "textarea", required: true, hint: "每行一个，格式：2026-09-30 09:30" },
+                    { key: "status", label: "状态", type: "select", options: [["confirmed", "已确认"], ["released", "已释放"]] },
+                  ]}
+                  onSaved={onChanged}
+                />
+              </div>
             </div>
-            <p className="text-sm text-muted-foreground">{studio?.name} · {studio?.city} · {studio?.address}</p>
-            <SlotChips keys={b.slots} />
           </Card>
         );
       })}
@@ -313,6 +427,82 @@ function CityProximitiesTab({ data, onChanged }: { data: Overview; onChanged: ()
   );
 }
 
+function MessagesTab({ accounts }: { accounts: Account[] }) {
+  const [announcement, setAnnouncement] = useState("");
+  const [targetId, setTargetId] = useState(accounts[0]?.id ?? "");
+  const [privateMessage, setPrivateMessage] = useState("");
+  const [busy, setBusy] = useState<"announcement" | "private" | "">("");
+  const [result, setResult] = useState("");
+  const [error, setError] = useState("");
+
+  const sendAnnouncement = async (event: React.FormEvent) => {
+    event.preventDefault();
+    const message = announcement.trim();
+    if (!message || !confirm(`确认向全站 ${accounts.length} 个账号发送这条公告？`)) return;
+    setBusy("announcement"); setError(""); setResult("");
+    try {
+      const response = await api.post("admin/broadcast", { message });
+      setAnnouncement("");
+      setResult(`公告已发送给 ${response.recipient_count} 个账号。`);
+    } catch (cause) {
+      setError(cause instanceof ApiError ? cause.message : "公告发送失败");
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const sendPrivateMessage = async (event: React.FormEvent) => {
+    event.preventDefault();
+    const message = privateMessage.trim();
+    if (!targetId || !message) return;
+    setBusy("private"); setError(""); setResult("");
+    try {
+      await api.post("admin/message", { account_id: targetId, message });
+      setPrivateMessage("");
+      setResult("私信已发送，对方会在站内通知中收到。");
+    } catch (cause) {
+      setError(cause instanceof ApiError ? cause.message : "私信发送失败");
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const roleLabel: Record<string, string> = { admin: "后台", studio: "录音棚", vendor: "供应商" };
+
+  return (
+    <div className="grid gap-5 lg:grid-cols-2">
+      <Card>
+        <SectionTitle>发布全站公告</SectionTitle>
+        <p className="mb-4 text-sm text-muted-foreground">公告会同时进入全部账号的站内通知，发布前会再次确认。</p>
+        <form onSubmit={sendAnnouncement} className="flex flex-col gap-4">
+          <Field label="公告内容"><Textarea maxLength={2000} value={announcement} onChange={(event) => setAnnouncement(event.target.value)} required /></Field>
+          <Button type="submit" disabled={busy !== "" || !announcement.trim()}>{busy === "announcement" ? "发送中…" : "发布全站公告"}</Button>
+        </form>
+      </Card>
+      <Card>
+        <SectionTitle>发送账号私信</SectionTitle>
+        <p className="mb-4 text-sm text-muted-foreground">选择一个账号，对方会在右上角“通知”中收到私信。</p>
+        <form onSubmit={sendPrivateMessage} className="flex flex-col gap-4">
+          <Field label="接收账号">
+            <select value={targetId} onChange={(event) => setTargetId(event.target.value)} className="h-10 rounded-md border border-input bg-background px-3 text-sm">
+              {accounts.map((item) => (
+                <option key={item.id} value={item.id}>{item.display_name || item.username} · {item.username}（{roleLabel[item.role]}）</option>
+              ))}
+            </select>
+          </Field>
+          <Field label="私信内容"><Textarea maxLength={2000} value={privateMessage} onChange={(event) => setPrivateMessage(event.target.value)} required /></Field>
+          <Button type="submit" disabled={busy !== "" || !targetId || !privateMessage.trim()}>{busy === "private" ? "发送中…" : "发送私信"}</Button>
+        </form>
+      </Card>
+      {(result || error) && (
+        <p className={`rounded-xl border px-4 py-3 text-sm lg:col-span-2 ${error ? "border-red-200 bg-red-50 text-red-800" : "border-emerald-200 bg-emerald-50 text-emerald-800"}`}>
+          {error || result}
+        </p>
+      )}
+    </div>
+  );
+}
+
 const EMPTY_ACCOUNT_FORM = {
   role: "studio", username: "", password: "", display_name: "", email: "", city: "", address: "",
 };
@@ -391,7 +581,22 @@ function AccountsTab({ data, onChanged }: { data: Overview; onChanged: () => voi
                     <p className="text-xs text-muted-foreground">{a.display_name} {a.email && `· ${a.email}`}</p>
                     {studio && <p className="mt-1 text-xs text-muted-foreground">{studio.city} · {studio.address}</p>}
                   </div>
-                  <Button variant="outline" onClick={() => del(a.id)}>删除</Button>
+                  <div className="flex gap-2">
+                    <RecordEditor
+                      targetType="account"
+                      targetId={a.id}
+                      title={`调整账号：${a.username}`}
+                      initial={{ username: a.username, display_name: a.display_name, email: a.email, password: "" }}
+                      fields={[
+                        { key: "username", label: "用户名", required: true },
+                        { key: "display_name", label: "显示名称" },
+                        { key: "email", label: "联系邮箱", type: "email" },
+                        { key: "password", label: "重置密码", type: "password", hint: "留空则不修改，填写时至少 6 位" },
+                      ]}
+                      onSaved={onChanged}
+                    />
+                    <Button variant="outline" onClick={() => del(a.id)}>删除</Button>
+                  </div>
                 </div>
                 <AdminNote targetType="account" targetId={a.id} value={a.admin_note ?? ""} onSaved={onChanged} />
               </div>
@@ -400,6 +605,163 @@ function AccountsTab({ data, onChanged }: { data: Overview; onChanged: () => voi
         </div>
       </Card>
     </div>
+  );
+}
+
+interface EditField {
+  key: string;
+  label: string;
+  type?: "text" | "email" | "password" | "textarea" | "select";
+  required?: boolean;
+  hint?: string;
+  options?: [string, string][];
+}
+
+function RecordEditor({ targetType, targetId, title, initial, fields, onSaved }: {
+  targetType: "account" | "studio" | "speaker" | "request" | "booking";
+  targetId: string;
+  title: string;
+  initial: Record<string, string>;
+  fields: EditField[];
+  onSaved: () => void | Promise<void>;
+}) {
+  const [open, setOpen] = useState(false);
+  const [form, setForm] = useState(initial);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const changeOpen = (next: boolean) => {
+    setOpen(next);
+    if (next) {
+      setForm(initial);
+      setErr("");
+    }
+  };
+
+  const save = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setBusy(true);
+    setErr("");
+    try {
+      const changes: Record<string, unknown> = { ...form };
+      if (targetType === "request" || targetType === "booking") {
+        changes.slots = form.slots.split(/[\n,，]+/).map((value) => value.trim()).filter(Boolean).map(parseKey);
+      }
+      if (targetType === "request") {
+        changes.preferred_cities = form.preferred_cities.split(/[、,，\n]+/).map((value) => value.trim()).filter(Boolean);
+      }
+      await api.post("admin/update-record", { target_type: targetType, target_id: targetId, changes });
+      await onSaved();
+      setOpen(false);
+    } catch (error) {
+      setErr(error instanceof ApiError ? error.message : "保存失败");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={changeOpen}>
+      <Button variant="outline" onClick={() => changeOpen(true)}>调整</Button>
+      <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>{title}</DialogTitle>
+          <DialogDescription>保存后系统会立即向对应账号发送站内通知。</DialogDescription>
+        </DialogHeader>
+        <form onSubmit={save} className="flex flex-col gap-4">
+          {fields.map((field) => (
+            <Field key={field.key} label={field.label} hint={field.hint}>
+              {field.type === "textarea" ? (
+                <Textarea
+                  value={form[field.key] ?? ""}
+                  onChange={(event) => setForm({ ...form, [field.key]: event.target.value })}
+                  required={field.required}
+                  rows={6}
+                />
+              ) : field.type === "select" ? (
+                <select
+                  value={form[field.key] ?? ""}
+                  onChange={(event) => setForm({ ...form, [field.key]: event.target.value })}
+                  className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+                >
+                  {field.options?.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+                </select>
+              ) : (
+                <Input
+                  type={field.type ?? "text"}
+                  value={form[field.key] ?? ""}
+                  onChange={(event) => setForm({ ...form, [field.key]: event.target.value })}
+                  required={field.required}
+                />
+              )}
+            </Field>
+          ))}
+          {err && <p className="text-sm text-destructive">{err}</p>}
+          <Button type="submit" disabled={busy}>{busy ? "保存中…" : "保存调整并通知"}</Button>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function AdminScheduleEditor({ studio, slots, onSaved }: {
+  studio: Studio;
+  slots: Slot[];
+  onSaved: () => void | Promise<void>;
+}) {
+  const [open, setOpen] = useState(false);
+  const [err, setErr] = useState("");
+  const dates = useMemo(() => upcomingDates(), []);
+  const times = useMemo(() => halfHours(ALL_DAY_START, ALL_DAY_END), []);
+  const studioSlots = useMemo(() => slots.filter((slot) => slot.studio_id === studio.id), [slots, studio.id]);
+  const locked = useMemo(() => new Set(studioSlots.filter((slot) => slot.status === "locked").map((slot) => slotKey(slot.date, slot.start))), [studioSlots]);
+  const blocked = useMemo(() => new Set(studioSlots.filter((slot) => slot.status === "blocked").map((slot) => slotKey(slot.date, slot.start))), [studioSlots]);
+  const special = useMemo(() => new Set(studioSlots.filter((slot) => slot.status === "free").map((slot) => slotKey(slot.date, slot.start))), [studioSlots]);
+  const marked = useMemo(() => new Set([...locked, ...blocked, ...special]), [blocked, locked, special]);
+  const selected = useMemo(() => new Set(
+    dates.flatMap((date) => times.map((start) => slotKey(date, start))).filter((key) => {
+      if (blocked.has(key) || locked.has(key)) return false;
+      if (special.has(key)) return true;
+      const [date, start] = key.split(" ");
+      return isWithinBusinessHours(studio.business_hours, date, start);
+    }),
+  ), [blocked, dates, locked, special, studio.business_hours, times]);
+
+  const setAvailability = async (keys: string[], available: boolean) => {
+    setErr("");
+    try {
+      await api.post("admin/slots/set", {
+        studio_id: studio.id,
+        slots: keys.map((key) => ({ ...parseKey(key), available })),
+      });
+      await onSaved();
+    } catch (error) {
+      setErr(error instanceof ApiError ? error.message : "档期调整失败");
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <Button variant="outline" onClick={() => setOpen(true)}>调整档期</Button>
+      <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-6xl">
+        <DialogHeader>
+          <DialogTitle>调整档期：{studio.name}</DialogTitle>
+          <DialogDescription>支持点选和拖选；已预约锁定的档期不能在这里覆盖。保存后会通知录音棚账号。</DialogDescription>
+        </DialogHeader>
+        {err && <p className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{err}</p>}
+        <ScheduleGrid
+          selected={selected}
+          locked={locked}
+          special={special}
+          counted={marked}
+          onToggle={(key) => void setAvailability([key], !selected.has(key))}
+          onBatchChange={setAvailability}
+          dates={dates}
+          times={times}
+          legend="studio"
+        />
+      </DialogContent>
+    </Dialog>
   );
 }
 

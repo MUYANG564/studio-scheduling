@@ -4,6 +4,7 @@ import type {
   Account, AdjustmentOption, Booking, MatchLocation, MatchMode, MatchResult, Speaker, StudioMatch,
 } from "../types";
 import { Button, Card, EmptyState, Field, Input, SectionTitle, Badge, Spinner, Textarea } from "../ui";
+import { BackupButton } from "../BackupButton";
 import { ScheduleGrid } from "../ScheduleGrid";
 import { ALL_DAY_END, ALL_DAY_START, halfHours, parseKey } from "../slots";
 import { SlotChips } from "./Studio";
@@ -87,6 +88,7 @@ export function VendorDashboard({ account }: { account: Account }) {
           <div className="flex flex-wrap gap-2">
             <Button className="bg-blue-500 text-white hover:bg-blue-400" onClick={startBooking}>发起新预约</Button>
             <Button className="border-white/20 bg-white/10 text-white hover:bg-white/20" variant="outline" onClick={() => setSpeakerOpen(true)}>新增项目 / 发音人</Button>
+            <BackupButton className="border-white/20 bg-white/10 text-white hover:bg-white/20" />
           </div>
         </div>
         <div className="mt-5 grid grid-cols-3 gap-3 border-t border-white/10 pt-4 text-center">
@@ -136,7 +138,7 @@ export function VendorDashboard({ account }: { account: Account }) {
       </Dialog>
 
       <Dialog open={bookingOpen} onOpenChange={setBookingOpen}>
-        <DialogContent className="max-h-[92vh] overflow-y-auto p-0 sm:max-w-6xl">
+        <DialogContent onInteractOutside={(event) => event.preventDefault()} className="max-h-[92vh] overflow-y-auto p-0 sm:max-w-6xl">
           {match ? (
             <MatchPanel
               match={match}
@@ -231,6 +233,14 @@ function NewRequest({ speakers, cities, onMatched, onAddSpeaker }: {
     });
   };
 
+  const setSlots = (keys: string[], selected: boolean) => {
+    setDesired((previous) => {
+      const next = new Set(previous);
+      keys.forEach((key) => selected ? next.add(key) : next.delete(key));
+      return next;
+    });
+  };
+
   const toggleCity = (city: string) => {
     setPreferredCities((previous) => {
       const next = new Set(previous);
@@ -320,8 +330,8 @@ function NewRequest({ speakers, cities, onMatched, onAddSpeaker }: {
           </div>
         ) : (
           <div>
-            <p className="mb-4 text-sm text-muted-foreground">全天 24 小时可选，每格半小时；可按住拖动连续选择。</p>
-            <ScheduleGrid selected={desired} onToggle={toggleSlot} times={times} legend="vendor" />
+            <p className="mb-4 text-sm text-muted-foreground">未来 31 天全天可选，每格半小时；可按住拖动连续选择或取消。</p>
+            <ScheduleGrid selected={desired} onToggle={toggleSlot} onBatchChange={setSlots} times={times} legend="vendor" />
           </div>
         )}
 

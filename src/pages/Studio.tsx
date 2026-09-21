@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { api, ApiError } from "../api";
 import type { Booking, BusinessHours, Slot, Studio } from "../types";
 import { Button, Card, EmptyState, Field, Input, SectionTitle, Textarea, Badge, Spinner } from "../ui";
+import { BackupButton } from "../BackupButton";
 import { ScheduleGrid } from "../ScheduleGrid";
 import {
   ALL_DAY_END, ALL_DAY_START, groupKeys, halfHours, isWithinBusinessHours,
@@ -37,7 +38,7 @@ export function StudioDashboard() {
 
   useEffect(() => { loadAll().catch(() => setLoading(false)); }, []);
 
-  const dates = useMemo(() => upcomingDates(14), []);
+  const dates = useMemo(() => upcomingDates(), []);
   const times = useMemo(() => halfHours(ALL_DAY_START, ALL_DAY_END), []);
   const locked = useMemo(() => new Set(slots.filter((slot) => slot.status === "locked").map((slot) => slotKey(slot.date, slot.start))), [slots]);
   const blocked = useMemo(() => new Set(slots.filter((slot) => slot.status === "blocked").map((slot) => slotKey(slot.date, slot.start))), [slots]);
@@ -92,6 +93,7 @@ export function StudioDashboard() {
             <Button className="bg-violet-500 text-white hover:bg-violet-400" onClick={() => setScheduleOpen(true)}>维护档期</Button>
             <Button className="border-white/20 bg-white/10 text-white hover:bg-white/20" variant="outline" onClick={() => setHoursOpen(true)}>营业时间</Button>
             <Button className="border-white/20 bg-white/10 text-white hover:bg-white/20" variant="outline" onClick={() => setProfileOpen(true)}>棚资料</Button>
+            <BackupButton className="border-white/20 bg-white/10 text-white hover:bg-white/20" />
           </div>
         </div>
         <div className="mt-5 grid grid-cols-3 gap-3 border-t border-white/10 pt-4 text-center">

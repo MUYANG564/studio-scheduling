@@ -24,6 +24,8 @@ const MESSAGES: Record<string, string> = {
   cannot_delete_self: "不能删除当前登录的管理员账号。",
   not_found: "未找到相关记录。",
   database_request_failed: "数据服务暂时不可用,请稍后重试。",
+  dingtalk_not_configured: "管理员尚未配置钉钉文档导出，请配置后再试。",
+  dingtalk_export_failed: "钉钉文档创建失败，请稍后重试或联系管理员。",
 };
 
 const TOKEN_KEY = "studio_sched_token";
