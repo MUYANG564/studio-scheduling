@@ -67,6 +67,22 @@ test("DingTalk client resolves a numeric userId to unionId", async () => {
   });
 });
 
+test("DingTalk client identifies operator lookup failures", async () => {
+  const responses = [
+    { accessToken: "server-token", expireIn: 7200 },
+    { errcode: 60011, errmsg: "no permission" },
+  ];
+  const client = createDingTalkClient({
+    env: (name) => ({ ...envValues, DINGTALK_OPERATOR_ID: "553593" })[name],
+    fetchImpl: async () => Response.json(responses.shift()),
+  });
+
+  await assert.rejects(
+    () => client.createDocument({ title: "数据备份", content: "# 备份" }),
+    (error) => error instanceof DingTalkError && error.code === "dingtalk_operator_failed",
+  );
+});
+
 test("DingTalk client fails clearly when server configuration is missing", async () => {
   const client = createDingTalkClient({ env: () => "", fetchImpl: async () => { throw new Error("should not fetch"); } });
   await assert.rejects(

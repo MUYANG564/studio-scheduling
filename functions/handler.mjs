@@ -394,6 +394,15 @@ async function exportDingTalkBackup(request, supabase, dingtalk) {
     if (error instanceof DingTalkError && error.code === "dingtalk_not_configured") {
       throw new HttpError("dingtalk_not_configured", 503);
     }
+    const diagnosticCodes = new Set([
+      "dingtalk_auth_failed",
+      "dingtalk_operator_failed",
+      "dingtalk_document_create_failed",
+      "dingtalk_document_write_failed",
+    ]);
+    if (error instanceof DingTalkError && diagnosticCodes.has(error.code)) {
+      throw new HttpError(error.code, 502);
+    }
     throw new HttpError("dingtalk_export_failed", 502);
   }
 }

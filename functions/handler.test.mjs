@@ -340,6 +340,17 @@ test("DingTalk backup reports missing server configuration", async () => {
   assert.equal(result.body.error, "dingtalk_not_configured");
 });
 
+test("DingTalk backup preserves safe diagnostic error codes", async () => {
+  const db = makeDb();
+  const result = await call(db, "backup/dingtalk", "vendor-account", {}, "POST", {
+    async createDocument() {
+      throw new DingTalkError("dingtalk_operator_failed");
+    },
+  });
+  assert.equal(result.status, 502);
+  assert.equal(result.body.error, "dingtalk_operator_failed");
+});
+
 test("only admins can broadcast announcements and send account messages", async () => {
   const db = makeDb();
   const forbidden = await call(db, "admin/broadcast", "vendor-account", { message: "越权公告" });

@@ -15,14 +15,14 @@ export class DingTalkError extends Error {
   }
 }
 
-async function requestJson(fetchImpl, url, init) {
+async function requestJson(fetchImpl, url, init, errorCode) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 15_000);
   let response;
   try {
     response = await fetchImpl(url, { ...init, signal: controller.signal });
   } catch {
-    throw new DingTalkError("dingtalk_export_failed");
+    throw new DingTalkError(errorCode);
   } finally {
     clearTimeout(timeout);
   }
@@ -30,10 +30,10 @@ async function requestJson(fetchImpl, url, init) {
   try {
     body = await response.json();
   } catch {
-    throw new DingTalkError("dingtalk_export_failed");
+    throw new DingTalkError(errorCode);
   }
   if (!response.ok || body?.code || body?.errcode) {
-    throw new DingTalkError("dingtalk_export_failed");
+    throw new DingTalkError(errorCode);
   }
   return body;
 }
@@ -51,9 +51,9 @@ export function createDingTalkClient({ env = readEnv, fetchImpl = fetch } = {}) 
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ appKey: settings.appKey, appSecret: settings.appSecret }),
-    });
+    }, "dingtalk_auth_failed");
     if (typeof body.accessToken !== "string" || !body.accessToken) {
-      throw new DingTalkError("dingtalk_export_failed");
+      throw new DingTalkError("dingtalk_auth_failed");
     }
     return body.accessToken;
   };
@@ -68,10 +68,11 @@ export function createDingTalkClient({ env = readEnv, fetchImpl = fetch } = {}) 
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ userid: operatorId, language: "zh_CN" }),
       },
+      "dingtalk_operator_failed",
     );
     const unionId = body?.result?.unionid;
     if (typeof unionId !== "string" || !unionId) {
-      throw new DingTalkError("dingtalk_export_failed");
+      throw new DingTalkError("dingtalk_operator_failed");
     }
     return unionId;
   };
@@ -96,18 +97,19 @@ export function createDingTalkClient({ env = readEnv, fetchImpl = fetch } = {}) 
           headers,
           body: JSON.stringify({ name: title, docType: "DOC", operatorId }),
         },
+        "dingtalk_document_create_failed",
       );
       if (typeof created.docKey !== "string" || typeof created.url !== "string") {
-        throw new DingTalkError("dingtalk_export_failed");
+        throw new DingTalkError("dingtalk_document_create_failed");
       }
       let documentUrl;
       try {
         documentUrl = new URL(created.url);
       } catch {
-        throw new DingTalkError("dingtalk_export_failed");
+        throw new DingTalkError("dingtalk_document_create_failed");
       }
       if (documentUrl.protocol !== "https:" || (documentUrl.hostname !== "dingtalk.com" && !documentUrl.hostname.endsWith(".dingtalk.com"))) {
-        throw new DingTalkError("dingtalk_export_failed");
+        throw new DingTalkError("dingtalk_document_create_failed");
       }
       await requestJson(
         fetchImpl,
@@ -117,6 +119,7 @@ export function createDingTalkClient({ env = readEnv, fetchImpl = fetch } = {}) 
           headers,
           body: JSON.stringify({ dataType: "markdown", content }),
         },
+        "dingtalk_document_write_failed",
       );
       return { documentId: created.docKey, url: created.url };
     },
