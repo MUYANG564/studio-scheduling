@@ -1,5 +1,9 @@
+import cityCoordinateData from "./data/city-coordinates.json" with { type: "json" };
+
 // Pure schedule-matching logic. No I/O; unit-testable and shared by the Function.
 // A slot key is `${date} ${start}`, e.g. "2026-09-25 14:30".
+
+const CITY_COORDINATES = cityCoordinateData.cities;
 
 export function slotKey(slot) {
   return `${slot.date} ${slot.start}`;
@@ -35,27 +39,71 @@ export function isWithinBusinessHours(businessHours, date, start) {
 }
 
 const normalizeCity = (value) => String(value ?? "").normalize("NFKC").trim().replace(/\s+/g, " ");
+const cityLookupKey = (value) => normalizeCity(value).toLocaleLowerCase("en-US");
+const cityIdentity = (value) => cityLookupKey(value).replace(/市$/u, "");
 
-function classifyLocation(city, preferredCities, proximities) {
+function coordinatesFor(city, coordinates) {
+  const key = cityLookupKey(city);
+  const candidateKeys = key.endsWith("市") ? [key, key.slice(0, -1)] : [`${key}市`, key];
+  const candidates = candidateKeys.map((candidate) => coordinates[candidate]).filter(Boolean);
+  const value = /\p{Script=Han}/u.test(key)
+    ? candidates.find((candidate) => Array.isArray(candidate) && candidate[2] === "CN") ?? candidates[0]
+    : candidates[0];
+  if (!value) return null;
+  const latitude = Number(Array.isArray(value) ? value[0] : value.latitude);
+  const longitude = Number(Array.isArray(value) ? value[1] : value.longitude);
+  return Number.isFinite(latitude) && Number.isFinite(longitude) ? { latitude, longitude } : null;
+}
+
+export function cityDistanceKm(fromCity, toCity, coordinates = CITY_COORDINATES) {
+  const from = coordinatesFor(fromCity, coordinates);
+  const to = coordinatesFor(toCity, coordinates);
+  if (!from || !to) return null;
+  const radians = (degrees) => degrees * Math.PI / 180;
+  const latitudeDelta = radians(to.latitude - from.latitude);
+  const longitudeDelta = radians(to.longitude - from.longitude);
+  const a = Math.sin(latitudeDelta / 2) ** 2
+    + Math.cos(radians(from.latitude)) * Math.cos(radians(to.latitude))
+    * Math.sin(longitudeDelta / 2) ** 2;
+  return Math.round(6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
+}
+
+function classifyLocation(city, preferredCities, proximities, coordinates) {
   if (preferredCities.length === 0) {
-    return { level: "neutral", rank: 0, nearbyTo: null, priority: null };
+    return { level: "neutral", rank: 0, nearbyTo: null, priority: null, distanceKm: null };
   }
-  if (preferredCities.includes(city)) {
-    return { level: "preferred", rank: 0, nearbyTo: city, priority: 0 };
+  const preferredCity = preferredCities.find((preferred) => cityIdentity(preferred) === cityIdentity(city));
+  if (preferredCity) {
+    return { level: "preferred", rank: 0, nearbyTo: preferredCity, priority: 0, distanceKm: 0 };
   }
 
   const nearby = proximities
-    .filter((p) => preferredCities.includes(p.city) && p.nearby_city === city)
+    .filter((p) => preferredCities.some((preferred) => cityIdentity(preferred) === cityIdentity(p.city))
+      && cityIdentity(p.nearby_city) === cityIdentity(city))
     .sort((a, b) => a.priority - b.priority || a.city.localeCompare(b.city))[0];
+  const distances = preferredCities
+    .map((preferred) => ({ city: preferred, distanceKm: cityDistanceKm(preferred, city, coordinates) }))
+    .filter((item) => item.distanceKm !== null)
+    .sort((a, b) => a.distanceKm - b.distanceKm || a.city.localeCompare(b.city));
   if (nearby) {
-    return { level: "nearby", rank: 1, nearbyTo: nearby.city, priority: nearby.priority };
+    return {
+      level: "nearby",
+      rank: 1,
+      nearbyTo: nearby.city,
+      priority: nearby.priority,
+      distanceKm: cityDistanceKm(nearby.city, city, coordinates),
+    };
   }
-  return { level: "other", rank: 2, nearbyTo: null, priority: null };
+  if (distances[0]) {
+    return { level: "distance", rank: 2, nearbyTo: distances[0].city, priority: null, distanceKm: distances[0].distanceKm };
+  }
+  return { level: "other", rank: 3, nearbyTo: null, priority: null, distanceKm: null };
 }
 
 function compareLocation(a, b) {
   return a.location.rank - b.location.rank
-    || (a.location.priority ?? 1000) - (b.location.priority ?? 1000);
+    || (a.location.priority ?? Number.MAX_SAFE_INTEGER) - (b.location.priority ?? Number.MAX_SAFE_INTEGER)
+    || (a.location.distanceKm ?? Number.MAX_SAFE_INTEGER) - (b.location.distanceKm ?? Number.MAX_SAFE_INTEGER);
 }
 
 function compareStable(a, b) {
@@ -83,12 +131,13 @@ export function computeMatches(desiredKeys, studios, options = {}) {
     nearby_city: normalizeCity(p.nearby_city),
     priority: Number.isInteger(p.priority) ? p.priority : 999,
   }));
+  const coordinates = options.cityCoordinates ?? CITY_COORDINATES;
 
   const scored = studios.map((s) => {
     const freeKeys = [...new Set(s.freeKeys ?? [])].sort();
     const free = new Set(freeKeys);
     const covered = desired.filter((key) => free.has(key));
-    const location = classifyLocation(normalizeCity(s.city), preferredCities, proximities);
+    const location = classifyLocation(normalizeCity(s.city), preferredCities, proximities, coordinates);
     const result = {
       studioId: s.id,
       name: s.name,

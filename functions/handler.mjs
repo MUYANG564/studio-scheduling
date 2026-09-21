@@ -118,12 +118,14 @@ async function requestPreferences(supabase, rawCities, rawMode) {
   };
 }
 async function notify(supabase, accountId, kind, message) {
-  await supabase.from("notifications").insert({
+  const { error } = await supabase.from("notifications").insert({
     id: uuid(), account_id: accountId, kind, message, read: false, created_at: NOW(),
   });
+  if (error) throw new HttpError("database_request_failed", 503);
 }
 async function notifyAdmins(supabase, kind, message) {
-  const { data } = await supabase.from("accounts").select("id").eq("role", "admin");
+  const { data, error } = await supabase.from("accounts").select("id").eq("role", "admin");
+  if (error) throw new HttpError("database_request_failed", 503);
   for (const a of data ?? []) await notify(supabase, a.id, kind, message);
 }
 
@@ -182,6 +184,7 @@ export async function handleApp({ request, supabase }) {
       case "vendor/request/matches": return await vendorRequestMatches(request, supabase);
       case "vendor/book": return await vendorBook(request, supabase);
       case "vendor/bookings": return await vendorBookings(request, supabase);
+      case "vendor/appeal": return await vendorAppeal(request, supabase);
       default: return err("not_found", 404);
     }
   } catch (e) {
@@ -285,7 +288,7 @@ async function adminCreateAccount(request, supabase) {
   if (!["studio", "vendor", "admin"].includes(role)) throw new HttpError("invalid_body", 400);
   if (!str(body.username, 64) || !str(body.password, 256) || body.password.length < 6) throw new HttpError("invalid_body", 400);
   if (!optStr(body.display_name, 128) || !optStr(body.email, 256)) throw new HttpError("invalid_body", 400);
-  if (["studio", "vendor"].includes(role) && (!str(body.display_name, 128) || !str(body.email, 256))) {
+  if (["studio", "vendor"].includes(role) && !str(body.display_name, 128)) {
     throw new HttpError("invalid_body", 400);
   }
   const city = normalizeCity(body.city);
@@ -397,33 +400,13 @@ async function adminResolveAppeal(request, supabase) {
   requireRole(account, "admin");
   const body = await readJson(request);
   if (!str(body.appeal_id, 64) || !["approved", "rejected"].includes(body.decision)) throw new HttpError("invalid_body", 400);
-  const { data: appeal } = await supabase.from("appeals").select("*").eq("id", body.appeal_id).maybeSingle();
-  if (!appeal || appeal.status !== "pending") throw new HttpError("not_found", 404);
 
-  if (body.decision === "rejected") {
-    await supabase.from("appeals").update({ status: "rejected", resolved_at: NOW() }).eq("id", appeal.id);
-    const studio = await findStudioById(supabase, appeal.studio_id);
-    if (studio) await notify(supabase, studio.account_id, "appeal_rejected", `申诉已被驳回(预约 ${appeal.booking_id.slice(0, 8)}),原预约档期仍然有效。`);
-    return json({ ok: true });
-  }
-
-  // approved: release the booking, free its slots, reopen the request for the vendor.
-  const { data: booking } = await supabase.from("bookings").select("*").eq("id", appeal.booking_id).maybeSingle();
-  if (!booking) throw new HttpError("not_found", 404);
-  await supabase.from("slots").delete().eq("booking_id", booking.id);
-  await supabase.from("bookings").update({ status: "released" }).eq("id", booking.id);
-  await supabase.from("appeals").update({ status: "approved", resolved_at: NOW() }).eq("id", appeal.id);
-
-  // Reopen the schedule request with the released slots so the vendor need not re-enter.
-  const { data: req } = await supabase.from("schedule_requests").select("*").eq("id", booking.request_id).maybeSingle();
-  if (req) {
-    const merged = [...new Set([...(req.desired ?? []), ...(booking.slots ?? [])])];
-    await supabase.from("schedule_requests").update({ desired: merged, status: "reopened" }).eq("id", req.id);
-    await notify(supabase, booking.vendor_account_id, "booking_released",
-      `原定录音棚因申诉已释放你的档期,请重新选择录音棚(档期已为你保留,无需重新填写)。`);
-  }
-  const studio = await findStudioById(supabase, appeal.studio_id);
-  if (studio) await notify(supabase, studio.account_id, "appeal_approved", `申诉已通过,相关档期已释放。`);
+  const { data, error } = await supabase.rpc("resolve_booking_appeal", {
+    p_appeal_id: body.appeal_id,
+    p_decision: body.decision,
+  });
+  if (error) throw new HttpError("database_request_failed", 503);
+  if (data !== "ok") throw new HttpError("not_found", 404);
   return json({ ok: true });
 }
 
@@ -446,15 +429,16 @@ async function studioSetup(request, supabase) {
   const account = await authenticate(request, supabase);
   requireRole(account, "studio");
   const body = await readJson(request);
-  if (!str(body.name, 128) || !str(body.city, 64) || !str(body.address, 256) || !str(body.email, 256)) {
+  if (!str(body.name, 128) || !str(body.city, 64) || !str(body.address, 256) || !optStr(body.email, 256)) {
     throw new HttpError("invalid_body", 400);
   }
   const city = normalizeCity(body.city);
+  const email = body.email?.trim() ?? "";
   const existing = await studioForAccount(supabase, account.id);
   if (existing) {
     // Location and name are remembered; allow correction but keep the same record.
     await supabase.from("studios").update({
-      name: body.name.trim(), city, address: body.address.trim(), email: body.email.trim(),
+      name: body.name.trim(), city, address: body.address.trim(), email,
     }).eq("id", existing.id);
     const updated = await studioForAccount(supabase, account.id);
     return json({ ok: true, studio: updated });
@@ -462,7 +446,7 @@ async function studioSetup(request, supabase) {
   const id = uuid();
   await supabase.from("studios").insert({
     id, account_id: account.id, name: body.name.trim(), city,
-    address: body.address.trim(), email: body.email.trim(), admin_note: "",
+    address: body.address.trim(), email, admin_note: "",
     business_hours: normalizeBusinessHours(), created_at: NOW(),
   });
   const studio = await studioForAccount(supabase, account.id);
@@ -532,6 +516,18 @@ async function studioSlotsSet(request, supabase) {
   return json({ ok: true, slots: data ?? [], skipped });
 }
 
+async function pendingAppealsByBooking(supabase, bookings) {
+  const bookingIds = bookings.map((booking) => booking.id);
+  const appeals = [];
+  for (let offset = 0; offset < bookingIds.length; offset += 100) {
+    const { data, error } = await supabase.from("appeals").select("booking_id,status,studio_id,vendor_account_id")
+      .in("booking_id", bookingIds.slice(offset, offset + 100)).eq("status", "pending");
+    if (error) throw new HttpError("database_request_failed", 503);
+    appeals.push(...(data ?? []));
+  }
+  return new Map(appeals.map((appeal) => [appeal.booking_id, appeal]));
+}
+
 async function studioBookings(request, supabase) {
   requireMethod(request, "GET");
   const account = await authenticate(request, supabase);
@@ -539,13 +535,22 @@ async function studioBookings(request, supabase) {
   const studio = await studioForAccount(supabase, account.id);
   if (!studio) throw new HttpError("needs_setup", 409);
   const { data: bookings } = await supabase.from("bookings").select("*").eq("studio_id", studio.id);
-  const speakers = await listAll(supabase, "speakers");
+  const bookingRows = bookings ?? [];
+  const [speakers, pendingAppeals] = await Promise.all([
+    listAll(supabase, "speakers"),
+    pendingAppealsByBooking(supabase, bookingRows),
+  ]);
   const byId = new Map(speakers.map((s) => [s.id, s]));
-  const enriched = (bookings ?? []).map((b) => ({
-    ...b,
-    project_name: byId.get(b.speaker_id)?.project_name ?? "",
-    stage_name: byId.get(b.speaker_id)?.stage_name ?? "",
-  }));
+  const enriched = bookingRows.map((b) => {
+    const appeal = pendingAppeals.get(b.id);
+    return {
+      ...b,
+      project_name: byId.get(b.speaker_id)?.project_name ?? "",
+      stage_name: byId.get(b.speaker_id)?.stage_name ?? "",
+      appeal_status: appeal?.status ?? null,
+      appeal_by: appeal ? (appeal.studio_id ? "studio" : "vendor") : null,
+    };
+  });
   return json({ ok: true, bookings: enriched });
 }
 
@@ -563,11 +568,14 @@ async function studioAppeal(request, supabase) {
   const { data: dup } = await supabase.from("appeals").select("id").eq("booking_id", booking.id).eq("status", "pending").maybeSingle();
   if (dup) throw new HttpError("appeal_pending", 409);
   const id = uuid();
-  await supabase.from("appeals").insert({
-    id, booking_id: booking.id, studio_id: studio.id, reason: body.reason.trim(),
-    status: "pending", created_at: NOW(), resolved_at: null,
+  const { error } = await supabase.from("appeals").insert({
+    id, booking_id: booking.id, studio_id: studio.id, vendor_account_id: null,
+    reason: body.reason.trim(), status: "pending", created_at: NOW(), resolved_at: null,
   });
-  await notifyAdmins(supabase, "appeal_submitted", `录音棚「${studio.name}」提交了档期申诉,待审核。`);
+  if (error?.code === "23505") throw new HttpError("appeal_pending", 409);
+  if (error) throw new HttpError("database_request_failed", 503);
+  await notifyAdmins(supabase, "appeal_submitted", `录音棚「${studio.name}」提交了预约取消申请,待审核。`);
+  await notify(supabase, booking.vendor_account_id, "appeal_submitted", `录音棚「${studio.name}」已申请取消预约，后台审核前预约仍然有效。`);
   return json({ ok: true, appeal_id: id });
 }
 
@@ -600,11 +608,11 @@ async function vendorCreateSpeaker(request, supabase) {
   const account = await authenticate(request, supabase);
   requireRole(account, "vendor");
   const body = await readJson(request);
-  if (!str(body.project_name, 128) || !str(body.stage_name, 128) || !str(body.email, 256)) throw new HttpError("invalid_body", 400);
+  if (!str(body.project_name, 128) || !str(body.stage_name, 128) || !optStr(body.email, 256)) throw new HttpError("invalid_body", 400);
   const id = uuid();
   await supabase.from("speakers").insert({
     id, vendor_account_id: account.id, project_name: body.project_name.trim(),
-    stage_name: body.stage_name.trim(), email: body.email.trim(), admin_note: "", created_at: NOW(),
+    stage_name: body.stage_name.trim(), email: body.email?.trim() ?? "", admin_note: "", created_at: NOW(),
   });
   return json({ ok: true, speaker_id: id });
 }
@@ -773,17 +781,50 @@ async function vendorBookings(request, supabase) {
   const account = await authenticate(request, supabase);
   requireRole(account, "vendor");
   const { data: bookings } = await supabase.from("bookings").select("*").eq("vendor_account_id", account.id);
-  const studios = await listAll(supabase, "studios");
-  const speakers = await listAll(supabase, "speakers");
+  const bookingRows = bookings ?? [];
+  const [studios, speakers, pendingAppeals] = await Promise.all([
+    listAll(supabase, "studios"),
+    listAll(supabase, "speakers"),
+    pendingAppealsByBooking(supabase, bookingRows),
+  ]);
   const sById = new Map(studios.map((s) => [s.id, s]));
   const spById = new Map(speakers.map((s) => [s.id, s]));
-  const enriched = (bookings ?? []).map((b) => ({
-    ...b,
-    studio_name: sById.get(b.studio_id)?.name ?? "",
-    city: sById.get(b.studio_id)?.city ?? "",
-    address: sById.get(b.studio_id)?.address ?? "",
-    project_name: spById.get(b.speaker_id)?.project_name ?? "",
-    stage_name: spById.get(b.speaker_id)?.stage_name ?? "",
-  }));
+  const enriched = bookingRows.map((b) => {
+    const appeal = pendingAppeals.get(b.id);
+    return {
+      ...b,
+      studio_name: sById.get(b.studio_id)?.name ?? "",
+      city: sById.get(b.studio_id)?.city ?? "",
+      address: sById.get(b.studio_id)?.address ?? "",
+      project_name: spById.get(b.speaker_id)?.project_name ?? "",
+      stage_name: spById.get(b.speaker_id)?.stage_name ?? "",
+      appeal_status: appeal?.status ?? null,
+      appeal_by: appeal ? (appeal.studio_id ? "studio" : "vendor") : null,
+    };
+  });
   return json({ ok: true, bookings: enriched });
+}
+
+async function vendorAppeal(request, supabase) {
+  requireMethod(request, "POST");
+  const account = await authenticate(request, supabase);
+  requireRole(account, "vendor");
+  const body = await readJson(request);
+  if (!str(body.booking_id, 64) || !str(body.reason, 1000)) throw new HttpError("invalid_body", 400);
+  const { data: booking } = await supabase.from("bookings").select("*").eq("id", body.booking_id).maybeSingle();
+  if (!booking || booking.vendor_account_id !== account.id) throw new HttpError("not_found", 404);
+  if (booking.status !== "confirmed") throw new HttpError("invalid_state", 409);
+  const { data: dup } = await supabase.from("appeals").select("id").eq("booking_id", booking.id).eq("status", "pending").maybeSingle();
+  if (dup) throw new HttpError("appeal_pending", 409);
+  const id = uuid();
+  const { error } = await supabase.from("appeals").insert({
+    id, booking_id: booking.id, studio_id: null, vendor_account_id: account.id,
+    reason: body.reason.trim(), status: "pending", created_at: NOW(), resolved_at: null,
+  });
+  if (error?.code === "23505") throw new HttpError("appeal_pending", 409);
+  if (error) throw new HttpError("database_request_failed", 503);
+  await notifyAdmins(supabase, "appeal_submitted", `供应商「${account.display_name || account.username}」提交了预约取消申请,待审核。`);
+  const studio = await findStudioById(supabase, booking.studio_id);
+  if (studio) await notify(supabase, studio.account_id, "appeal_submitted", `供应商已申请取消预约 ${booking.id.slice(0, 8)}，后台审核前预约仍然有效。`);
+  return json({ ok: true, appeal_id: id });
 }

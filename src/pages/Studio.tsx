@@ -7,6 +7,10 @@ import {
   ALL_DAY_END, ALL_DAY_START, groupKeys, halfHours, isWithinBusinessHours,
   normalizeBusinessHours, shortDate, slotKey, upcomingDates, weekday,
 } from "../slots";
+import {
+  Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle,
+} from "@/components/ui/dialog";
+import { cn } from "@/lib/utils";
 
 export function StudioDashboard() {
   const [studio, setStudio] = useState<Studio | null>(null);
@@ -15,6 +19,9 @@ export function StudioDashboard() {
   const [bookings, setBookings] = useState<Booking[]>([]);
   const [loading, setLoading] = useState(true);
   const [msg, setMsg] = useState("");
+  const [profileOpen, setProfileOpen] = useState(false);
+  const [hoursOpen, setHoursOpen] = useState(false);
+  const [scheduleOpen, setScheduleOpen] = useState(false);
 
   const loadAll = async () => {
     const me = await api.get("studio/me");
@@ -66,50 +73,90 @@ export function StudioDashboard() {
   if (loading) return <div className="flex justify-center py-16"><Spinner /></div>;
   if (needsSetup) return <StudioSetup onDone={loadAll} />;
 
+  const confirmedCount = bookings.filter((booking) => booking.status === "confirmed").length;
+  const pendingCount = bookings.filter((booking) => booking.appeal_status === "pending").length;
+
   return (
-    <div className="flex flex-col gap-6">
-      <Card>
-        <SectionTitle right={<Badge tone="blue">{studio?.city}</Badge>}>{studio?.name}</SectionTitle>
-        <p className="text-sm text-muted-foreground">{studio?.address}</p>
-        <p className="mt-1 text-sm text-muted-foreground">联系邮箱:{studio?.email}</p>
-        <details className="mt-3">
-          <summary className="cursor-pointer text-sm text-muted-foreground hover:text-foreground">修改棚信息</summary>
-          <div className="mt-3"><StudioSetup studio={studio} onDone={loadAll} /></div>
-        </details>
+    <div className="flex flex-col gap-5">
+      <Card className="border-0 bg-gradient-to-br from-slate-950 via-slate-900 to-violet-950 text-white shadow-xl">
+        <div className="flex flex-col justify-between gap-5 md:flex-row md:items-center">
+          <div>
+            <div className="flex flex-wrap items-center gap-2">
+              <p className="text-sm text-violet-200">录音棚工作台</p>
+              <Badge tone="blue">{studio?.city}</Badge>
+            </div>
+            <h1 className="mt-1 text-2xl font-semibold">{studio?.name}</h1>
+            <p className="mt-2 text-sm text-slate-300">{studio?.address}</p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button className="bg-violet-500 text-white hover:bg-violet-400" onClick={() => setScheduleOpen(true)}>维护档期</Button>
+            <Button className="border-white/20 bg-white/10 text-white hover:bg-white/20" variant="outline" onClick={() => setHoursOpen(true)}>营业时间</Button>
+            <Button className="border-white/20 bg-white/10 text-white hover:bg-white/20" variant="outline" onClick={() => setProfileOpen(true)}>棚资料</Button>
+          </div>
+        </div>
+        <div className="mt-5 grid grid-cols-3 gap-3 border-t border-white/10 pt-4 text-center">
+          <StudioMetric label="有效预约" value={confirmedCount} />
+          <StudioMetric label="取消审核中" value={pendingCount} />
+          <StudioMetric label="特别开放" value={special.size} />
+        </div>
       </Card>
 
-      <Card>
-        <SectionTitle>每周营业时间</SectionTitle>
-        <p className="mb-4 text-sm text-muted-foreground">营业时间内默认可预约，休息日和非营业时间无需逐个点掉。</p>
-        <BusinessHoursEditor
-          value={studio?.business_hours}
-          onSaved={(businessHours) => setStudio((current) => current ? { ...current, business_hours: businessHours } : current)}
-        />
-      </Card>
+      {msg && <p className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">{msg}</p>}
 
       <Card>
-        <SectionTitle>档期例外维护（半小时精度）</SectionTitle>
-        <p className="mb-4 text-sm text-muted-foreground">在营业时间内可标记临时占用；与供应商协商后，也可以点亮或拖选非营业时段，作为特别开放档期。</p>
-        {msg && <p className="mb-3 text-sm text-destructive">{msg}</p>}
-        <ScheduleGrid
-          selected={selected}
-          locked={locked}
-          special={special}
-          counted={marked}
-          onToggle={toggle}
-          onBatchChange={setAvailability}
-          dates={dates}
-          times={times}
-          legend="studio"
-        />
+        <SectionTitle right={<Badge tone="blue">{bookings.length} 条记录</Badge>}>预约记录</SectionTitle>
+        <StudioBookings bookings={bookings} onAppealed={loadAll} />
       </Card>
 
-      <Card>
-        <SectionTitle>已确认预约</SectionTitle>
-        <StudioBookings bookings={bookings.filter((b) => b.status === "confirmed")} onAppealed={loadAll} />
-      </Card>
+      <Dialog open={profileOpen} onOpenChange={setProfileOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>录音棚资料</DialogTitle>
+            <DialogDescription>这里的信息会显示给预约方。邮箱仅作为联系资料，不发送系统邮件。</DialogDescription>
+          </DialogHeader>
+          <StudioSetup studio={studio} onDone={async () => { await loadAll(); setProfileOpen(false); }} />
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={hoursOpen} onOpenChange={setHoursOpen}>
+        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-3xl">
+          <DialogHeader>
+            <DialogTitle>每周营业时间</DialogTitle>
+            <DialogDescription>营业时间内默认可预约，休息日和非营业时间无需逐个关闭。</DialogDescription>
+          </DialogHeader>
+          <BusinessHoursEditor
+            value={studio?.business_hours}
+            onSaved={(businessHours) => setStudio((current) => current ? { ...current, business_hours: businessHours } : current)}
+          />
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={scheduleOpen} onOpenChange={setScheduleOpen}>
+        <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-6xl">
+          <DialogHeader>
+            <DialogTitle>档期例外维护</DialogTitle>
+            <DialogDescription>营业时间内可标记临时占用；非营业时间可设置特别开放。支持拖选。</DialogDescription>
+          </DialogHeader>
+          {msg && <p className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800">{msg}</p>}
+          <ScheduleGrid
+            selected={selected}
+            locked={locked}
+            special={special}
+            counted={marked}
+            onToggle={toggle}
+            onBatchChange={setAvailability}
+            dates={dates}
+            times={times}
+            legend="studio"
+          />
+        </DialogContent>
+      </Dialog>
     </div>
   );
+}
+
+function StudioMetric({ label, value }: { label: string; value: number }) {
+  return <div><p className="text-2xl font-semibold">{value}</p><p className="mt-1 text-xs text-slate-300">{label}</p></div>;
 }
 
 const BUSINESS_DAYS = [
@@ -225,7 +272,7 @@ function StudioSetup({ studio, onDone }: { studio?: Studio | null; onDone: () =>
         <Field label="所在城市"><Input value={city} onChange={(e) => setCity(e.target.value)} required /></Field>
       </div>
       <Field label="详细地点"><Input value={address} onChange={(e) => setAddress(e.target.value)} required /></Field>
-      <Field label="联系邮箱" hint="用于接收预约与申诉结果的邮件提醒"><Input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required /></Field>
+      <Field label="联系邮箱（选填）" hint="仅作为联系资料保存，系统通知请在右上角查看。"><Input type="email" value={email} onChange={(e) => setEmail(e.target.value)} /></Field>
       {err && <p className="text-sm text-destructive">{err}</p>}
       <div><Button type="submit" disabled={busy}>{busy ? "保存中…" : "保存"}</Button></div>
     </form>
@@ -233,48 +280,77 @@ function StudioSetup({ studio, onDone }: { studio?: Studio | null; onDone: () =>
 }
 
 function StudioBookings({ bookings, onAppealed }: { bookings: Booking[]; onAppealed: () => void }) {
-  const [appealFor, setAppealFor] = useState<string | null>(null);
+  const [appealFor, setAppealFor] = useState<Booking | null>(null);
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  const ordered = useMemo(() => [...bookings].sort((a, b) => b.created_at.localeCompare(a.created_at)), [bookings]);
 
-  if (bookings.length === 0) return <EmptyState>暂无预约</EmptyState>;
+  if (ordered.length === 0) return <EmptyState>供应商预约成功后，记录会固定显示在这里。</EmptyState>;
 
-  const submitAppeal = async (bookingId: string) => {
+  const submitAppeal = async () => {
+    if (!appealFor) return;
     setBusy(true); setErr("");
     try {
-      await api.post("studio/appeal", { booking_id: bookingId, reason: reason.trim() });
+      await api.post("studio/appeal", { booking_id: appealFor.id, reason: reason.trim() });
       setAppealFor(null); setReason("");
-      onAppealed();
-    } catch (e) {
-      setErr(e instanceof ApiError ? e.message : "提交失败");
+      await onAppealed();
+    } catch (error) {
+      setErr(error instanceof ApiError ? error.message : "提交失败");
     } finally { setBusy(false); }
   };
 
   return (
-    <div className="flex flex-col gap-3">
-      {bookings.map((b) => (
-        <div key={b.id} className="rounded-lg border border-border p-4">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="font-medium">{b.project_name} · {b.stage_name}</p>
-              <p className="text-xs text-muted-foreground">共 {b.slots.length} 个档期</p>
+    <>
+      <div className="grid gap-3 md:grid-cols-2">
+        {ordered.map((booking) => (
+          <div key={booking.id} className={cn("rounded-xl border p-4", booking.status === "released" ? "border-border bg-neutral-50 opacity-75" : "border-border bg-white")}>
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="font-semibold">{booking.project_name} · {booking.stage_name}</p>
+                <p className="mt-1 text-xs text-muted-foreground">共 {booking.slots.length} 个半小时档期</p>
+              </div>
+              <Badge tone={booking.status === "confirmed" ? booking.appeal_status ? "amber" : "green" : "gray"}>
+                {booking.status === "released" ? "已取消" : booking.appeal_status ? "取消审核中" : "已确认"}
+              </Badge>
             </div>
-            <Button variant="outline" onClick={() => { setAppealFor(appealFor === b.id ? null : b.id); setReason(""); setErr(""); }}>
-              {appealFor === b.id ? "取消" : "申诉释放"}
-            </Button>
+            <SlotChips keys={booking.slots} />
+            {booking.status === "confirmed" && (
+              <div className="mt-4 border-t border-border pt-3">
+                {booking.appeal_status ? (
+                  <p className="text-xs text-amber-700">
+                    {booking.appeal_by === "studio" ? "你已提交取消申请，后台正在审核。" : "供应商已申请取消，后台正在审核；审核前预约仍然有效。"}
+                  </p>
+                ) : (
+                  <Button variant="outline" onClick={() => { setAppealFor(booking); setReason(""); setErr(""); }}>申请取消预约</Button>
+                )}
+              </div>
+            )}
           </div>
-          <SlotChips keys={b.slots} />
-          {appealFor === b.id && (
-            <div className="mt-3 flex flex-col gap-2">
-              <Textarea placeholder="请说明申诉原因(例如:该档期已线下预定,尚未及时更新)" value={reason} onChange={(e) => setReason(e.target.value)} />
-              {err && <p className="text-sm text-destructive">{err}</p>}
-              <div><Button variant="danger" disabled={busy || !reason.trim()} onClick={() => submitAppeal(b.id)}>{busy ? "提交中…" : "提交申诉至后台"}</Button></div>
+        ))}
+      </div>
+
+      {appealFor && (
+        <Dialog open onOpenChange={(open) => { if (!open) setAppealFor(null); }}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>申请取消预约</DialogTitle>
+              <DialogDescription>提交后由后台审核。审核通过前，当前预约和档期仍然有效。</DialogDescription>
+            </DialogHeader>
+            <div className="rounded-lg border border-border bg-neutral-50 p-3 text-sm">
+              <p className="font-medium">{appealFor.project_name} · {appealFor.stage_name}</p>
+              <SlotChips keys={appealFor.slots} />
             </div>
-          )}
-        </div>
-      ))}
-    </div>
+            <Field label="取消原因"><Textarea placeholder="请说明需要取消预约的原因" value={reason} onChange={(event) => setReason(event.target.value)} /></Field>
+            {err && <p className="text-sm text-destructive">{err}</p>}
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" onClick={() => setAppealFor(null)}>暂不取消</Button>
+              <Button variant="danger" disabled={busy || !reason.trim()} onClick={submitAppeal}>{busy ? "提交中…" : "提交后台审核"}</Button>
+            </div>
+          </DialogContent>
+        </Dialog>
+      )}
+    </>
   );
 }
 

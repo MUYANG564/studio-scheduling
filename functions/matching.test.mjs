@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  computeMatches, isWithinBusinessHours, normalizeBusinessHours,
+  cityDistanceKm, computeMatches, isWithinBusinessHours, normalizeBusinessHours,
 } from "./matching.mjs";
 
 const desired = ["2026-09-25 09:00", "2026-09-25 09:30", "2026-09-25 10:00"];
@@ -91,4 +91,67 @@ test("location-first returns alternative slots on requested dates", () => {
   ], { preferredCities: ["北京"], matchMode: "location_first", proximities });
   assert.equal(result.tier, "P2");
   assert.deepEqual(result.adjustmentOptions[0].available, [extra]);
+});
+
+test("P2 location-first sorts unconfigured cities by geographic distance", () => {
+  const result = computeMatches(desired, [
+    studio("上海棚", "上海", desired.slice(0, 2)),
+    studio("天津棚", "天津", desired.slice(0, 1)),
+  ], { preferredCities: ["北京"], matchMode: "location_first", proximities: [] });
+
+  assert.equal(result.partial[0].name, "天津棚");
+  assert.equal(result.partial[0].location.level, "distance");
+  assert.ok(result.partial[0].location.distanceKm < result.partial[1].location.distanceKm);
+});
+
+test("manual proximity remains ahead of automatic geographic distance", () => {
+  const result = computeMatches(desired, [
+    studio("天津棚", "天津", desired.slice(0, 1)),
+    studio("上海棚", "上海", desired.slice(0, 1)),
+  ], {
+    preferredCities: ["北京"],
+    matchMode: "location_first",
+    proximities: [{ city: "北京", nearby_city: "上海", priority: 1 }],
+  });
+
+  assert.equal(result.partial[0].name, "上海棚");
+  assert.equal(result.partial[0].location.level, "nearby");
+});
+
+test("city coordinate lookup supports Chinese municipality suffixes", () => {
+  const result = computeMatches(desired, [
+    studio("天津棚", "天津市", desired.slice(0, 1)),
+  ], { preferredCities: ["北京市"], matchMode: "location_first", proximities: [] });
+
+  assert.equal(result.partial[0].location.level, "distance");
+  assert.ok(result.partial[0].location.distanceKm > 0);
+});
+
+test("city suffix variants are treated as the same preferred city", () => {
+  const result = computeMatches(desired, [
+    studio("北京棚", "北京市", desired),
+  ], { preferredCities: ["北京"], matchMode: "location_first", proximities: [] });
+
+  assert.equal(result.tier, "P0");
+  assert.equal(result.p0[0].location.level, "preferred");
+});
+
+test("Chinese aliases prefer Chinese coordinates when names collide globally", () => {
+  const distance = cityDistanceKm("北京", "安顺");
+
+  assert.ok(distance > 1_000 && distance < 2_500);
+});
+
+test("manual proximity does not borrow distance from another preferred city", () => {
+  const result = computeMatches(desired, [
+    studio("上海棚", "上海", desired.slice(0, 1)),
+  ], {
+    preferredCities: ["不存在的城市", "北京"],
+    matchMode: "location_first",
+    proximities: [{ city: "不存在的城市", nearby_city: "上海", priority: 1 }],
+  });
+
+  assert.equal(result.partial[0].location.level, "nearby");
+  assert.equal(result.partial[0].location.nearbyTo, "不存在的城市");
+  assert.equal(result.partial[0].location.distanceKm, null);
 });

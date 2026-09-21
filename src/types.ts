@@ -61,12 +61,15 @@ export interface Booking {
   address?: string;
   project_name?: string;
   stage_name?: string;
+  appeal_status: "pending" | null;
+  appeal_by: "studio" | "vendor" | null;
 }
 
 export interface Appeal {
   id: string;
   booking_id: string;
-  studio_id: string;
+  studio_id: string | null;
+  vendor_account_id: string | null;
   reason: string;
   status: "pending" | "approved" | "rejected";
   created_at: string;
@@ -75,7 +78,7 @@ export interface Appeal {
 
 export type MatchMode = "schedule_first" | "location_first";
 export type MatchTier = "P0" | "P1" | "P2";
-export type LocationLevel = "preferred" | "nearby" | "other" | "neutral";
+export type LocationLevel = "preferred" | "nearby" | "distance" | "other" | "neutral";
 
 export interface ScheduleRequest {
   id: string;
@@ -102,6 +105,7 @@ export interface MatchLocation {
   rank: number;
   nearbyTo: string | null;
   priority: number | null;
+  distanceKm: number | null;
 }
 
 export interface StudioMatch {

@@ -3,10 +3,13 @@ import { api, ApiError } from "../api";
 import type {
   Account, AdjustmentOption, Booking, MatchLocation, MatchMode, MatchResult, Speaker, StudioMatch,
 } from "../types";
-import { Button, Card, EmptyState, Field, Input, SectionTitle, Badge, Spinner } from "../ui";
+import { Button, Card, EmptyState, Field, Input, SectionTitle, Badge, Spinner, Textarea } from "../ui";
 import { ScheduleGrid } from "../ScheduleGrid";
 import { ALL_DAY_END, ALL_DAY_START, halfHours, parseKey } from "../slots";
 import { SlotChips } from "./Studio";
+import {
+  Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle,
+} from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 
 interface CityOption {
@@ -29,7 +32,7 @@ const MODE_LABEL: Record<MatchMode, string> = {
   location_first: "位置优先",
 };
 
-export function VendorDashboard({ account: _account }: { account: Account }) {
+export function VendorDashboard({ account }: { account: Account }) {
   const [speakers, setSpeakers] = useState<Speaker[]>([]);
   const [requests, setRequests] = useState<OpenRequest[]>([]);
   const [bookings, setBookings] = useState<Booking[]>([]);
@@ -37,6 +40,8 @@ export function VendorDashboard({ account: _account }: { account: Account }) {
   const [loading, setLoading] = useState(true);
   const [match, setMatch] = useState<MatchResult | null>(null);
   const [notice, setNotice] = useState("");
+  const [bookingOpen, setBookingOpen] = useState(false);
+  const [speakerOpen, setSpeakerOpen] = useState(false);
 
   const reload = async () => {
     const [sp, rq, bk, options] = await Promise.all([
@@ -52,24 +57,53 @@ export function VendorDashboard({ account: _account }: { account: Account }) {
 
   const openReselect = requests.filter((request) =>
     (request.status === "open" || request.status === "reopened") && request.desired.length > 0);
+  const confirmedCount = bookings.filter((booking) => booking.status === "confirmed").length;
+  const pendingCount = bookings.filter((booking) => booking.appeal_status === "pending").length;
 
   const loadMatches = async (requestId: string) => {
     setNotice("");
     const result = await api.get("vendor/request/matches", `&request_id=${encodeURIComponent(requestId)}`);
     setMatch(result);
+    setBookingOpen(true);
+  };
+
+  const startBooking = () => {
+    setMatch(null);
+    setNotice("");
+    setBookingOpen(true);
   };
 
   if (loading) return <div className="flex justify-center py-16"><Spinner /></div>;
 
   return (
-    <div className="flex flex-col gap-6">
+    <div className="flex flex-col gap-5">
+      <Card className="border-0 bg-gradient-to-br from-slate-950 via-slate-900 to-blue-950 text-white shadow-xl">
+        <div className="flex flex-col justify-between gap-5 md:flex-row md:items-center">
+          <div>
+            <p className="text-sm text-blue-200">供应商工作台</p>
+            <h1 className="mt-1 text-2xl font-semibold">{account.display_name || account.username}</h1>
+            <p className="mt-2 text-sm text-slate-300">预约记录固定保留在主页，需要安排新档期时再进入分步操作。</p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button className="bg-blue-500 text-white hover:bg-blue-400" onClick={startBooking}>发起新预约</Button>
+            <Button className="border-white/20 bg-white/10 text-white hover:bg-white/20" variant="outline" onClick={() => setSpeakerOpen(true)}>新增项目 / 发音人</Button>
+          </div>
+        </div>
+        <div className="mt-5 grid grid-cols-3 gap-3 border-t border-white/10 pt-4 text-center">
+          <SummaryMetric label="有效预约" value={confirmedCount} />
+          <SummaryMetric label="待继续安排" value={openReselect.length} />
+          <SummaryMetric label="取消审核中" value={pendingCount} />
+        </div>
+      </Card>
+
+      {notice && <p className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">{notice}</p>}
+
       {openReselect.length > 0 && (
-        <Card className="border-amber-200 bg-gradient-to-br from-amber-50 to-white">
+        <Card className="border-amber-200 bg-amber-50/60">
           <SectionTitle>待继续安排</SectionTitle>
-          <p className="mb-4 text-sm text-amber-800">这些项目还有未锁定档期，城市偏好和匹配策略都已保留。</p>
           <div className="grid gap-3 md:grid-cols-2">
             {openReselect.map((request) => (
-              <div key={request.id} className="rounded-xl border border-amber-200 bg-white p-4 shadow-sm">
+              <div key={request.id} className="rounded-xl border border-amber-200 bg-white p-4">
                 <div className="flex items-start justify-between gap-3">
                   <div>
                     <p className="font-semibold">{request.project_name} · {request.stage_name}</p>
@@ -79,10 +113,6 @@ export function VendorDashboard({ account: _account }: { account: Account }) {
                   </div>
                   <Button onClick={() => loadMatches(request.id)}>{request.status === "reopened" ? "重新选择" : "继续安排"}</Button>
                 </div>
-                <div className="mt-3 flex flex-wrap gap-2 text-xs">
-                  <Badge tone="blue">P0 → P1 → P2 分批推荐</Badge>
-                  <Badge tone="gray">{request.preferred_cities?.length ? request.preferred_cities.join("、") : "无意向城市"}</Badge>
-                </div>
                 <SlotChips keys={request.desired} />
               </div>
             ))}
@@ -90,90 +120,100 @@ export function VendorDashboard({ account: _account }: { account: Account }) {
         </Card>
       )}
 
-      <SpeakerManager speakers={speakers} onChanged={reload} />
-
-      <NewRequest
-        speakers={speakers}
-        cities={cities}
-        onMatched={(result) => { setNotice(""); setMatch(result); reload(); }}
-      />
-
-      {match && (
-        <MatchPanel
-          match={match}
-          notice={notice}
-          onBooked={async (text) => {
-            setNotice(text);
-            await reload();
-            await loadMatches(match.request_id);
-            setNotice(text);
-          }}
-          onAdjusted={async (result, text) => {
-            setMatch(result);
-            setNotice(text);
-            await reload();
-          }}
-          onClose={() => setMatch(null)}
-        />
-      )}
-
       <Card>
-        <SectionTitle>我的预约</SectionTitle>
-        <VendorBookings bookings={bookings} />
+        <SectionTitle right={<Badge tone="blue">{bookings.length} 条记录</Badge>}>预约记录</SectionTitle>
+        <VendorBookings bookings={bookings} onAppealed={reload} />
       </Card>
+
+      <Dialog open={speakerOpen} onOpenChange={setSpeakerOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>新增项目 / 发音人</DialogTitle>
+            <DialogDescription>保存后可用于发起新的录音棚预约。</DialogDescription>
+          </DialogHeader>
+          <SpeakerManager onChanged={async () => { await reload(); setSpeakerOpen(false); }} />
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={bookingOpen} onOpenChange={setBookingOpen}>
+        <DialogContent className="max-h-[92vh] overflow-y-auto p-0 sm:max-w-6xl">
+          {match ? (
+            <MatchPanel
+              match={match}
+              notice={notice}
+              onBooked={async (text, complete) => {
+                await reload();
+                if (complete) {
+                  setNotice(text);
+                  setMatch(null);
+                  setBookingOpen(false);
+                  return;
+                }
+                await loadMatches(match.request_id);
+                setNotice(text);
+              }}
+              onAdjusted={async (result, text) => {
+                setMatch(result);
+                setNotice(text);
+                await reload();
+              }}
+              onClose={() => { setMatch(null); setBookingOpen(false); }}
+            />
+          ) : (
+            <NewRequest
+              speakers={speakers}
+              cities={cities}
+              onMatched={(result) => { setNotice(""); setMatch(result); reload(); }}
+              onAddSpeaker={() => { setBookingOpen(false); setSpeakerOpen(true); }}
+            />
+          )}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
 
-function SpeakerManager({ speakers, onChanged }: { speakers: Speaker[]; onChanged: () => void }) {
+function SummaryMetric({ label, value }: { label: string; value: number }) {
+  return <div><p className="text-2xl font-semibold">{value}</p><p className="mt-1 text-xs text-slate-300">{label}</p></div>;
+}
+
+function SpeakerManager({ onChanged }: { onChanged: () => void | Promise<void> }) {
   const [project, setProject] = useState("");
   const [stage, setStage] = useState("");
   const [email, setEmail] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
-  const [open, setOpen] = useState(false);
 
   const add = async (event: React.FormEvent) => {
     event.preventDefault();
     setBusy(true); setErr("");
     try {
       await api.post("vendor/speaker/create", { project_name: project.trim(), stage_name: stage.trim(), email: email.trim() });
-      setProject(""); setStage(""); setEmail(""); setOpen(false);
-      onChanged();
+      await onChanged();
     } catch (error) { setErr(error instanceof ApiError ? error.message : "添加失败"); }
     finally { setBusy(false); }
   };
 
   return (
-    <Card>
-      <SectionTitle right={<Button variant="outline" onClick={() => setOpen((value) => !value)}>{open ? "取消" : "新增项目 / 发音人"}</Button>}>项目与发音人</SectionTitle>
-      {open && (
-        <form onSubmit={add} className="mb-4 grid gap-3 rounded-xl border border-border bg-neutral-50 p-4 sm:grid-cols-3">
-          <Field label="项目名称"><Input value={project} onChange={(event) => setProject(event.target.value)} required /></Field>
-          <Field label="发音人艺名 / 姓名"><Input value={stage} onChange={(event) => setStage(event.target.value)} required /></Field>
-          <Field label="联系邮箱"><Input type="email" value={email} onChange={(event) => setEmail(event.target.value)} required /></Field>
-          {err && <p className="text-sm text-destructive sm:col-span-3">{err}</p>}
-          <div className="sm:col-span-3"><Button type="submit" disabled={busy}>{busy ? "保存中…" : "保存"}</Button></div>
-        </form>
-      )}
-      {speakers.length === 0 ? (
-        <EmptyState>还没有项目，请先新增。</EmptyState>
-      ) : (
-        <div className="flex flex-wrap gap-2">
-          {speakers.map((speaker) => (
-            <span key={speaker.id} className="rounded-lg border border-border bg-neutral-50 px-3 py-1.5 text-sm">{speaker.project_name} · {speaker.stage_name}</span>
-          ))}
-        </div>
-      )}
-    </Card>
+    <form onSubmit={add} className="flex flex-col gap-4">
+      <Field label="项目名称"><Input value={project} onChange={(event) => setProject(event.target.value)} required /></Field>
+      <Field label="发音人艺名 / 姓名"><Input value={stage} onChange={(event) => setStage(event.target.value)} required /></Field>
+      <Field label="联系邮箱（选填）" hint="仅作为联系资料保存，系统通知请在右上角查看。">
+        <Input type="email" value={email} onChange={(event) => setEmail(event.target.value)} />
+      </Field>
+      {err && <p className="text-sm text-destructive">{err}</p>}
+      <Button type="submit" disabled={busy}>{busy ? "保存中…" : "保存项目"}</Button>
+    </form>
   );
 }
 
-function NewRequest({ speakers, cities, onMatched }: {
+function NewRequest({ speakers, cities, onMatched, onAddSpeaker }: {
   speakers: Speaker[];
   cities: CityOption[];
   onMatched: (result: MatchResult) => void;
+  onAddSpeaker: () => void;
 }) {
+  const [step, setStep] = useState(0);
   const [speakerId, setSpeakerId] = useState("");
   const [desired, setDesired] = useState<Set<string>>(new Set());
   const [preferredCities, setPreferredCities] = useState<Set<string>>(new Set());
@@ -199,54 +239,62 @@ function NewRequest({ speakers, cities, onMatched }: {
     });
   };
 
-  const clearCities = () => setPreferredCities(new Set());
-
   const submit = async () => {
     setBusy(true); setErr("");
     try {
-      const slots = [...desired].map((key) => parseKey(key));
       const result = await api.post("vendor/request/create", {
         speaker_id: speakerId,
-        slots,
+        slots: [...desired].map((key) => parseKey(key)),
         preferred_cities: [...preferredCities],
         match_mode: "schedule_first",
       });
       onMatched(result);
-      setDesired(new Set());
     } catch (error) { setErr(error instanceof ApiError ? error.message : "提交失败"); }
     finally { setBusy(false); }
   };
 
+  const titles = ["选择项目 / 发音人", "选择意向城市", "选择录音日期和时间"];
+
   return (
-    <Card className="overflow-hidden border-0 bg-gradient-to-br from-slate-950 via-slate-900 to-blue-950 p-0 text-white shadow-xl">
-      <div className="border-b border-white/10 px-5 py-5 sm:px-7">
-        <p className="text-xs font-medium uppercase tracking-[0.22em] text-blue-300">智能匹配</p>
-        <h2 className="mt-1 text-2xl font-semibold">发起新的档期匹配</h2>
-        <p className="mt-2 text-sm text-slate-300">先选择项目、意向城市和录音时间。系统会先按地区分批推荐全覆盖方案。</p>
+    <div className="min-h-[34rem] bg-white">
+      <div className="border-b border-border bg-slate-950 px-6 py-5 text-white">
+        <p className="text-xs font-medium uppercase tracking-[0.22em] text-blue-300">新预约 · 第 {step + 1}/3 步</p>
+        <h2 className="mt-1 text-2xl font-semibold">{titles[step]}</h2>
+        <div className="mt-4 grid grid-cols-3 gap-2">
+          {titles.map((title, index) => (
+            <div key={title} className={cn("h-1.5 rounded-full", index <= step ? "bg-blue-400" : "bg-white/15")} />
+          ))}
+        </div>
       </div>
 
-      {speakers.length === 0 ? (
-        <div className="p-6"><EmptyState>请先在上方新增项目 / 发音人。</EmptyState></div>
-      ) : (
-        <div className="flex flex-col gap-6 p-5 sm:p-7">
-          <Step number="1" title="选择项目 / 发音人">
+      <div className="p-5 sm:p-7">
+        {speakers.length === 0 ? (
+          <div className="mx-auto max-w-md py-14 text-center">
+            <p className="font-semibold">还没有项目或发音人</p>
+            <p className="mt-2 text-sm text-muted-foreground">请先建立项目资料，再发起预约。</p>
+            <Button className="mt-5" onClick={onAddSpeaker}>新增项目 / 发音人</Button>
+          </div>
+        ) : step === 0 ? (
+          <div className="mx-auto max-w-xl py-8">
+            <p className="mb-3 text-sm text-muted-foreground">本次预约属于哪个项目和发音人？</p>
             <select
               value={speakerId}
               onChange={(event) => setSpeakerId(event.target.value)}
-              className="h-11 w-full rounded-lg border border-white/15 bg-white/10 px-3 text-sm text-white outline-none focus:border-blue-400 sm:max-w-md"
+              className="h-12 w-full rounded-lg border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
             >
-              {speakers.map((speaker) => <option className="text-neutral-900" key={speaker.id} value={speaker.id}>{speaker.project_name} · {speaker.stage_name}</option>)}
+              {speakers.map((speaker) => <option key={speaker.id} value={speaker.id}>{speaker.project_name} · {speaker.stage_name}</option>)}
             </select>
-          </Step>
-
-          <Step number="2" title="选择意向城市" description="只显示已有录音棚入驻的城市，可多选。">
+          </div>
+        ) : step === 1 ? (
+          <div className="mx-auto max-w-2xl py-8">
+            <p className="mb-4 text-sm text-muted-foreground">可多选；不选城市时，系统将优先按档期完整度推荐。</p>
             <div className="flex flex-wrap gap-2">
               <button
                 type="button"
-                onClick={clearCities}
+                onClick={() => setPreferredCities(new Set())}
                 className={cn(
                   "rounded-full border px-4 py-2 text-sm transition",
-                  preferredCities.size === 0 ? "border-blue-400 bg-blue-500 text-white" : "border-white/20 bg-white/5 text-slate-200 hover:bg-white/10",
+                  preferredCities.size === 0 ? "border-blue-600 bg-blue-600 text-white" : "border-border bg-background hover:bg-accent",
                 )}
               >
                 无意向城市
@@ -260,7 +308,7 @@ function NewRequest({ speakers, cities, onMatched }: {
                     onClick={() => toggleCity(city.name)}
                     className={cn(
                       "rounded-full border px-4 py-2 text-sm transition",
-                      active ? "border-blue-400 bg-blue-500 text-white" : "border-white/20 bg-white/5 text-slate-200 hover:bg-white/10",
+                      active ? "border-blue-600 bg-blue-600 text-white" : "border-border bg-background hover:bg-accent",
                     )}
                   >
                     {city.name} <span className="opacity-70">{city.studio_count} 棚</span>
@@ -268,42 +316,32 @@ function NewRequest({ speakers, cities, onMatched }: {
                 );
               })}
             </div>
-            {cities.length === 0 && <p className="text-sm text-amber-300">还没有录音棚完善城市信息，目前只能按档期匹配。</p>}
-          </Step>
-
-          <Step number="3" title="选择需要录音的档期" description="全天 24 小时可选，每格半小时；非营业时段只有录音棚特别开放后才会匹配成功。">
-            <div className="rounded-xl bg-white p-4 text-neutral-900">
-              <ScheduleGrid selected={desired} onToggle={toggleSlot} times={times} legend="vendor" />
-            </div>
-          </Step>
-
-          {err && <p className="rounded-lg bg-red-500/15 px-4 py-3 text-sm text-red-200">{err}</p>}
-          <div className="flex flex-wrap items-center justify-between gap-3 border-t border-white/10 pt-5">
-            <p className="text-sm text-slate-300">
-              {preferredCities.size ? `意向：${[...preferredCities].join("、")}` : "无意向城市"} · {desired.size} 个档期
-            </p>
-            <Button className="bg-blue-500 px-6 text-white hover:bg-blue-400" disabled={busy || desired.size === 0 || !speakerId} onClick={submit}>
-              {busy ? "正在计算…" : "开始匹配"}
-            </Button>
+            {cities.length === 0 && <p className="mt-3 text-sm text-amber-700">当前没有可选城市，将按档期匹配。</p>}
           </div>
-        </div>
-      )}
-    </Card>
-  );
-}
+        ) : (
+          <div>
+            <p className="mb-4 text-sm text-muted-foreground">全天 24 小时可选，每格半小时；可按住拖动连续选择。</p>
+            <ScheduleGrid selected={desired} onToggle={toggleSlot} times={times} legend="vendor" />
+          </div>
+        )}
 
-function Step({ number, title, description, children }: {
-  number: string; title: string; description?: string; children: React.ReactNode;
-}) {
-  return (
-    <section className="grid gap-3 sm:grid-cols-[2.25rem_1fr]">
-      <span className="flex h-9 w-9 items-center justify-center rounded-full bg-blue-500 font-semibold text-white">{number}</span>
-      <div>
-        <h3 className="font-semibold">{title}</h3>
-        {description && <p className="mt-0.5 text-sm text-slate-400">{description}</p>}
-        <div className="mt-3">{children}</div>
+        {err && <p className="mt-4 rounded-lg bg-red-50 px-4 py-3 text-sm text-red-700">{err}</p>}
+        {speakers.length > 0 && (
+          <div className="mt-6 flex flex-wrap items-center justify-between gap-3 border-t border-border pt-5">
+            <Button variant="outline" disabled={step === 0 || busy} onClick={() => setStep((current) => current - 1)}>上一步</Button>
+            <p className="text-sm text-muted-foreground">
+              {step === 1 && (preferredCities.size ? `已选：${[...preferredCities].join("、")}` : "无意向城市")}
+              {step === 2 && `已选 ${desired.size} 个半小时档期`}
+            </p>
+            {step < 2 ? (
+              <Button disabled={!speakerId} onClick={() => setStep((current) => current + 1)}>下一步</Button>
+            ) : (
+              <Button disabled={busy || desired.size === 0} onClick={submit}>{busy ? "正在计算…" : "完成选择并查看推荐"}</Button>
+            )}
+          </div>
+        )}
       </div>
-    </section>
+    </div>
   );
 }
 
@@ -331,7 +369,7 @@ function ModeCard({ active, disabled, light = false, title, description, onClick
 function MatchPanel({ match, notice, onBooked, onAdjusted, onClose }: {
   match: MatchResult;
   notice: string;
-  onBooked: (text: string) => Promise<void>;
+  onBooked: (text: string, complete: boolean) => Promise<void>;
   onAdjusted: (result: MatchResult, text: string) => Promise<void>;
   onClose: () => void;
 }) {
@@ -359,7 +397,7 @@ function MatchPanel({ match, notice, onBooked, onAdjusted, onClose }: {
       const text = result.remaining.length > 0
         ? `已锁定 ${result.locked.length} 个档期，还有 ${result.remaining.length} 个时段待安排。`
         : `全部 ${result.locked.length} 个档期已锁定，预约完成。`;
-      await onBooked(text);
+      await onBooked(text, result.remaining.length === 0);
     } catch (error) { setErr(error instanceof ApiError ? error.message : "预约失败"); }
     finally { setBusy(false); }
   };
@@ -369,11 +407,13 @@ function MatchPanel({ match, notice, onBooked, onAdjusted, onClose }: {
     setBusy(true); setErr("");
     try {
       let lockedTotal = 0;
+      let remainingCount = remaining.length;
       for (const studio of match.combination.studios) {
         const result = await api.post("vendor/book", { request_id: match.request_id, studio_id: studio.studioId });
         lockedTotal += result.locked.length;
+        remainingCount = result.remaining.length;
       }
-      await onBooked(`组合方案已确认，共锁定 ${lockedTotal} 个档期。`);
+      await onBooked(`组合方案已确认，共锁定 ${lockedTotal} 个档期。`, remainingCount === 0);
     } catch (error) { setErr(error instanceof ApiError ? error.message : "预约失败，请刷新后查看已成功锁定的部分"); }
     finally { setBusy(false); }
   };
@@ -490,7 +530,7 @@ function MatchPanel({ match, notice, onBooked, onAdjusted, onClose }: {
                       active={p2Mode === "location_first"}
                       disabled={match.preferredCities.length === 0 || busy}
                       title="地区优先"
-                      description="先用意向及邻近城市的棚覆盖，缺口再提供可调整档期。"
+                      description="意向城市优先，其他城市按距离由近到远；后台指定的邻近城市会优先于自动距离。"
                       onClick={() => chooseP2Mode("location_first")}
                     />
                     <ModeCard
@@ -498,7 +538,7 @@ function MatchPanel({ match, notice, onBooked, onAdjusted, onClose }: {
                       active={p2Mode === "schedule_first"}
                       disabled={busy}
                       title="档期优先"
-                      description="优先覆盖更多原定档期，再参考地区和邻近关系。"
+                      description="优先覆盖更多原定档期；覆盖数相同时，再按地区和城市距离排序。"
                       onClick={() => chooseP2Mode("schedule_first")}
                     />
                   </div>
@@ -511,7 +551,7 @@ function MatchPanel({ match, notice, onBooked, onAdjusted, onClose }: {
                       <div>
                         <p className="text-xs font-semibold uppercase tracking-wider text-blue-700">P2 推荐组合</p>
                         <h3 className="mt-1 text-lg font-semibold">
-                          {match.effectiveMode === "schedule_first" ? "尽量保留原定档期" : "优先留在意向及邻近城市"}
+                          {match.effectiveMode === "schedule_first" ? "尽量保留原定档期" : "优先选择距离更近的城市"}
                         </h3>
                         <p className="mt-1 text-sm text-slate-600">
                           可覆盖 {match.combination.covered.length}/{remaining.length} 个档期，共需 {match.combination.studios.length} 个棚
@@ -655,7 +695,8 @@ function StudioMatchCard({ studio, total, primary = false, busy, onBook }: {
 
 function LocationBadge({ location, city }: { location: MatchLocation; city: string }) {
   if (location.level === "preferred") return <Badge tone="blue">意向城市 · {city}</Badge>;
-  if (location.level === "nearby") return <Badge tone="amber">邻近城市 · {city}</Badge>;
+  if (location.level === "nearby") return <Badge tone="amber">优先邻近 · {city}{location.distanceKm !== null ? ` · 约 ${location.distanceKm} km` : ""}</Badge>;
+  if (location.level === "distance") return <Badge tone="gray">{city} · 约 {location.distanceKm} km</Badge>;
   if (location.level === "neutral") return <Badge tone="gray">{city}</Badge>;
   return <Badge tone="gray">其他城市 · {city}</Badge>;
 }
@@ -721,22 +762,78 @@ function AdjustmentPanel({ options, uncoveredCount, selected, onToggle, busy, on
   );
 }
 
-function VendorBookings({ bookings }: { bookings: Booking[] }) {
-  const confirmed = useMemo(() => bookings.filter((booking) => booking.status === "confirmed"), [bookings]);
-  if (confirmed.length === 0) return <EmptyState>暂无预约</EmptyState>;
+function VendorBookings({ bookings, onAppealed }: { bookings: Booking[]; onAppealed: () => void }) {
+  const [appealFor, setAppealFor] = useState<Booking | null>(null);
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const ordered = useMemo(() => [...bookings].sort((a, b) => b.created_at.localeCompare(a.created_at)), [bookings]);
+
+  const submitAppeal = async () => {
+    if (!appealFor) return;
+    setBusy(true); setErr("");
+    try {
+      await api.post("vendor/appeal", { booking_id: appealFor.id, reason: reason.trim() });
+      setAppealFor(null); setReason("");
+      await onAppealed();
+    } catch (error) { setErr(error instanceof ApiError ? error.message : "提交失败"); }
+    finally { setBusy(false); }
+  };
+
+  if (ordered.length === 0) return <EmptyState>预约成功后，记录会固定显示在这里。</EmptyState>;
+
   return (
-    <div className="grid gap-3 md:grid-cols-2">
-      {confirmed.map((booking) => (
-        <div key={booking.id} className="rounded-xl border border-border p-4">
-          <div className="flex items-center justify-between gap-3">
-            <p className="font-semibold">{booking.project_name} · {booking.stage_name}</p>
-            <Badge tone="green">已确认</Badge>
+    <>
+      <div className="grid gap-3 md:grid-cols-2">
+        {ordered.map((booking) => (
+          <div key={booking.id} className={cn("rounded-xl border p-4", booking.status === "released" ? "border-border bg-neutral-50 opacity-75" : "border-border bg-white")}>
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="font-semibold">{booking.project_name} · {booking.stage_name}</p>
+                <p className="mt-1 text-sm text-muted-foreground">{booking.studio_name} · {booking.city}</p>
+                <p className="text-xs text-muted-foreground">{booking.address}</p>
+              </div>
+              <Badge tone={booking.status === "confirmed" ? booking.appeal_status ? "amber" : "green" : "gray"}>
+                {booking.status === "released" ? "已取消" : booking.appeal_status ? "取消审核中" : "已确认"}
+              </Badge>
+            </div>
+            <SlotChips keys={booking.slots} />
+            {booking.status === "confirmed" && (
+              <div className="mt-4 border-t border-border pt-3">
+                {booking.appeal_status ? (
+                  <p className="text-xs text-amber-700">
+                    {booking.appeal_by === "vendor" ? "你已提交取消申请，后台正在审核。" : "录音棚已申请取消，后台正在审核；审核前预约仍然有效。"}
+                  </p>
+                ) : (
+                  <Button variant="outline" onClick={() => { setAppealFor(booking); setErr(""); setReason(""); }}>申请取消预约</Button>
+                )}
+              </div>
+            )}
           </div>
-          <p className="mt-1 text-sm text-muted-foreground">{booking.studio_name} · {booking.city}</p>
-          <p className="text-xs text-muted-foreground">{booking.address}</p>
-          <SlotChips keys={booking.slots} />
-        </div>
-      ))}
-    </div>
+        ))}
+      </div>
+
+      {appealFor && (
+        <Dialog open onOpenChange={(open) => { if (!open) setAppealFor(null); }}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>申请取消预约</DialogTitle>
+              <DialogDescription>提交后由后台审核。审核通过前，当前预约和档期仍然有效。</DialogDescription>
+            </DialogHeader>
+            <div className="rounded-lg border border-border bg-neutral-50 p-3 text-sm">
+              <p className="font-medium">{appealFor.project_name} · {appealFor.stage_name}</p>
+              <p className="mt-1 text-muted-foreground">{appealFor.studio_name} · {appealFor.city}</p>
+              <SlotChips keys={appealFor.slots} />
+            </div>
+            <Field label="取消原因"><Textarea placeholder="请说明需要取消预约的原因" value={reason} onChange={(event) => setReason(event.target.value)} /></Field>
+            {err && <p className="text-sm text-destructive">{err}</p>}
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" onClick={() => setAppealFor(null)}>暂不取消</Button>
+              <Button variant="danger" disabled={busy || !reason.trim()} onClick={submitAppeal}>{busy ? "提交中…" : "提交后台审核"}</Button>
+            </div>
+          </DialogContent>
+        </Dialog>
+      )}
+    </>
   );
 }

@@ -71,6 +71,7 @@ export function AdminDashboard() {
 
 function AppealsTab({ data, onChanged }: { data: Overview; onChanged: () => void }) {
   const studioById = useMemo(() => new Map(data.studios.map((s) => [s.id, s])), [data.studios]);
+  const accountById = useMemo(() => new Map(data.accounts.map((account) => [account.id, account])), [data.accounts]);
   const bookingById = useMemo(() => new Map(data.bookings.map((b) => [b.id, b])), [data.bookings]);
   const speakerById = useMemo(() => new Map(data.speakers.map((s) => [s.id, s])), [data.speakers]);
   const [busy, setBusy] = useState("");
@@ -91,20 +92,23 @@ function AppealsTab({ data, onChanged }: { data: Overview; onChanged: () => void
         {pending.length === 0 ? <EmptyState>没有待处理的申诉</EmptyState> : (
           <div className="flex flex-col gap-3">
             {pending.map((a) => {
-              const studio = studioById.get(a.studio_id);
+              const isStudioAppeal = !!a.studio_id;
+              const studio = a.studio_id ? studioById.get(a.studio_id) : null;
+              const vendor = a.vendor_account_id ? accountById.get(a.vendor_account_id) : null;
               const booking = bookingById.get(a.booking_id);
               const speaker = booking ? speakerById.get(booking.speaker_id) : null;
+              const requester = isStudioAppeal ? (studio?.name ?? "已删除录音棚") : (vendor?.display_name ?? vendor?.username ?? "已删除供应商");
               return (
                 <div key={a.id} className="rounded-lg border border-border p-4">
                   <div className="flex items-start justify-between gap-3">
                     <div>
-                      <p className="font-medium">{studio?.name ?? "录音棚"} <span className="text-xs text-muted-foreground">申诉释放档期</span></p>
-                      {speaker && <p className="text-xs text-muted-foreground">涉及:{speaker.project_name} · {speaker.stage_name}</p>}
-                      <p className="mt-2 text-sm">申诉原因:{a.reason}</p>
+                      <p className="font-medium">{requester} <span className="text-xs text-muted-foreground">{isStudioAppeal ? "录音棚申请取消" : "供应商申请取消"}</span></p>
+                      {speaker && <p className="text-xs text-muted-foreground">涉及：{speaker.project_name} · {speaker.stage_name}</p>}
+                      <p className="mt-2 text-sm">取消原因：{a.reason}</p>
                       {booking && <SlotChips keys={booking.slots} />}
                     </div>
                     <div className="flex shrink-0 gap-2">
-                      <Button variant="danger" disabled={!!busy} onClick={() => resolve(a.id, "approved")}>通过(释放档期)</Button>
+                      <Button variant="danger" disabled={!!busy} onClick={() => resolve(a.id, "approved")}>通过并取消预约</Button>
                       <Button variant="outline" disabled={!!busy} onClick={() => resolve(a.id, "rejected")}>驳回</Button>
                     </div>
                   </div>
@@ -119,12 +123,16 @@ function AppealsTab({ data, onChanged }: { data: Overview; onChanged: () => void
         <SectionTitle>历史申诉</SectionTitle>
         {resolved.length === 0 ? <EmptyState>暂无</EmptyState> : (
           <div className="flex flex-col gap-2">
-            {resolved.map((a) => (
-              <div key={a.id} className="flex items-center justify-between rounded-lg border border-border p-3 text-sm">
-                <span>{studioById.get(a.studio_id)?.name} — {a.reason}</span>
-                <Badge tone={a.status === "approved" ? "green" : "gray"}>{a.status === "approved" ? "已通过" : "已驳回"}</Badge>
-              </div>
-            ))}
+            {resolved.map((a) => {
+              const studio = a.studio_id ? studioById.get(a.studio_id) : null;
+              const vendor = a.vendor_account_id ? accountById.get(a.vendor_account_id) : null;
+              return (
+                <div key={a.id} className="flex items-center justify-between rounded-lg border border-border p-3 text-sm">
+                  <span>{studio?.name ?? vendor?.display_name ?? vendor?.username ?? "供应商"} — {a.reason}</span>
+                  <Badge tone={a.status === "approved" ? "green" : "gray"}>{a.status === "approved" ? "已通过" : "已驳回"}</Badge>
+                </div>
+              );
+            })}
           </div>
         )}
       </Card>
@@ -257,7 +265,7 @@ function CityProximitiesTab({ data, onChanged }: { data: Overview; onChanged: ()
     <div className="grid gap-5 lg:grid-cols-[22rem_1fr]">
       <Card>
         <SectionTitle>新增邻近关系</SectionTitle>
-        <p className="mb-4 text-sm text-muted-foreground">关系有方向。例如设置“北京 → 天津”，表示供应商选北京时会优先推荐天津；反方向需要另建一条。</p>
+        <p className="mb-4 text-sm text-muted-foreground">系统默认按城市直线距离推荐。这里可指定更符合实际交通的优先城市，并覆盖自动距离排序。关系有方向，例如“北京 → 天津”；反方向需要另建一条。</p>
         <form onSubmit={save} className="flex flex-col gap-4">
           <Field label="意向城市">
             <select value={city} onChange={(event) => {
@@ -283,7 +291,7 @@ function CityProximitiesTab({ data, onChanged }: { data: Overview; onChanged: ()
 
       <Card>
         <SectionTitle>已设置的城市关系</SectionTitle>
-        {grouped.size === 0 ? <EmptyState>还没有设置。供应商匹配时只区分意向城市和其他城市。</EmptyState> : (
+        {grouped.size === 0 ? <EmptyState>还没有人工设置，系统将按本地城市坐标自动计算直线距离。</EmptyState> : (
           <div className="flex flex-col gap-4">
             {[...grouped.entries()].map(([source, relations]) => (
               <div key={source} className="rounded-xl border border-border p-4">
@@ -360,7 +368,7 @@ function AccountsTab({ data, onChanged }: { data: Overview; onChanged: () => voi
             <Field label="用户名"><Input value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} required /></Field>
             <Field label="初始密码" hint="至少 6 位"><Input type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} required /></Field>
             <Field label={nameLabel}><Input value={form.display_name} onChange={(e) => setForm({ ...form, display_name: e.target.value })} required={needsProfile} /></Field>
-            <Field label="联系邮箱"><Input type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} required={needsProfile} /></Field>
+            <Field label="联系邮箱（选填）" hint="仅作为联系资料保存；预约和申诉结果通过站内通知发送。"><Input type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} /></Field>
             {form.role === "studio" && (
               <>
                 <Field label="所在城市"><Input value={form.city} onChange={(e) => setForm({ ...form, city: e.target.value })} required /></Field>
