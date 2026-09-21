@@ -1,6 +1,9 @@
-// Half-hour slot helpers shared by studio and vendor schedule grids.
+import type { BusinessHours } from "./types";
+
 export const DAY_START = "08:00";
 export const DAY_END = "22:00";
+export const ALL_DAY_START = "00:00";
+export const ALL_DAY_END = "24:00";
 
 export function halfHours(from = DAY_START, to = DAY_END): string[] {
   const out: string[] = [];
@@ -30,6 +33,27 @@ export function upcomingDates(count = 14, base = new Date()): string[] {
     out.push(toDateStr(d));
   }
   return out;
+}
+
+export function defaultBusinessHours(): BusinessHours {
+  return Object.fromEntries(Array.from({ length: 7 }, (_, day) => [
+    String(day), { enabled: true, start: DAY_START, end: DAY_END },
+  ]));
+}
+
+export function normalizeBusinessHours(value?: BusinessHours): BusinessHours {
+  const defaults = defaultBusinessHours();
+  return Object.fromEntries(Array.from({ length: 7 }, (_, day) => {
+    const key = String(day);
+    const entry = value?.[key];
+    return [key, entry ? { ...entry } : defaults[key]];
+  }));
+}
+
+export function isWithinBusinessHours(hours: BusinessHours | undefined, date: string, start: string): boolean {
+  const day = String(new Date(`${date}T00:00:00Z`).getUTCDay());
+  const entry = normalizeBusinessHours(hours)[day];
+  return entry.enabled && start >= entry.start && start < entry.end;
 }
 
 const WEEK = ["日", "一", "二", "三", "四", "五", "六"];

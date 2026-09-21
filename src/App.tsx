@@ -46,17 +46,17 @@ export default function App() {
   if (!account) return <Login onLoggedIn={onLoggedIn} />;
 
   return (
-    <div className="min-h-dvh bg-neutral-50">
-      <header className="sticky top-0 z-10 border-b border-border bg-background/95 backdrop-blur">
-        <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-3">
-          <div className="flex items-center gap-3">
-            <span className="text-base font-semibold tracking-tight">录音棚档期匹配平台</span>
-            <span className="rounded-full bg-secondary px-2.5 py-0.5 text-xs text-secondary-foreground">{ROLE_LABEL[account.role]}</span>
+    <div className="min-h-dvh bg-background">
+      <header className="sticky top-0 z-10 border-b border-border bg-white/90 shadow-sm backdrop-blur">
+        <div className="mx-auto flex max-w-6xl items-center justify-between gap-2 px-3 py-3 sm:px-4">
+          <div className="flex min-w-0 items-center gap-3">
+            <span className="truncate text-sm font-semibold tracking-tight sm:text-base">录音棚档期匹配平台</span>
+            <span className="hidden shrink-0 rounded-full bg-secondary px-2.5 py-0.5 text-xs text-secondary-foreground md:inline-flex">{ROLE_LABEL[account.role]}</span>
           </div>
-          <div className="flex items-center gap-3">
+          <div className="flex shrink-0 items-center gap-2 sm:gap-3">
             <NotificationBell />
             <span className="hidden text-sm text-muted-foreground sm:inline">{account.display_name || account.username}</span>
-            <Button variant="outline" onClick={logout}>退出</Button>
+            <Button className="whitespace-nowrap px-3 sm:px-4" variant="outline" onClick={logout}>退出</Button>
           </div>
         </div>
       </header>

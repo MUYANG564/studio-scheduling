@@ -22,6 +22,7 @@ create table if not exists public.studios (
   address text not null default '',
   email text not null default '',
   admin_note text not null default '',
+  business_hours jsonb not null default '{"0":{"enabled":true,"start":"08:00","end":"22:00"},"1":{"enabled":true,"start":"08:00","end":"22:00"},"2":{"enabled":true,"start":"08:00","end":"22:00"},"3":{"enabled":true,"start":"08:00","end":"22:00"},"4":{"enabled":true,"start":"08:00","end":"22:00"},"5":{"enabled":true,"start":"08:00","end":"22:00"},"6":{"enabled":true,"start":"08:00","end":"22:00"}}'::jsonb,
   created_at timestamptz not null
 );
 
@@ -40,9 +41,20 @@ create table if not exists public.slots (
   studio_id uuid not null,
   date text not null,
   start text not null,
-  status text not null,
+  status text not null check (status in ('free', 'blocked', 'locked')),
   booking_id uuid,
-  created_at timestamptz not null
+  created_at timestamptz not null,
+  unique (studio_id, date, start)
+);
+
+create table if not exists public.city_proximities (
+  id uuid primary key,
+  city text not null,
+  nearby_city text not null,
+  priority integer not null check (priority between 1 and 999),
+  created_at timestamptz not null,
+  unique (city, nearby_city),
+  check (city <> nearby_city)
 );
 
 create table if not exists public.schedule_requests (
@@ -50,6 +62,8 @@ create table if not exists public.schedule_requests (
   speaker_id uuid not null,
   vendor_account_id uuid not null,
   desired jsonb not null default '[]'::jsonb,
+  preferred_cities jsonb not null default '[]'::jsonb,
+  match_mode text not null default 'schedule_first' check (match_mode in ('schedule_first', 'location_first')),
   status text not null,
   created_at timestamptz not null
 );
@@ -90,6 +104,7 @@ create index if not exists idx_speakers_vendor on public.speakers (vendor_accoun
 create index if not exists idx_slots_studio on public.slots (studio_id);
 create index if not exists idx_slots_date_status on public.slots (date, status);
 create index if not exists idx_slots_booking on public.slots (booking_id);
+create index if not exists idx_city_proximities_city_priority on public.city_proximities (city, priority);
 create index if not exists idx_requests_vendor on public.schedule_requests (vendor_account_id);
 create index if not exists idx_bookings_studio on public.bookings (studio_id);
 create index if not exists idx_appeals_booking on public.appeals (booking_id);
@@ -100,6 +115,7 @@ alter table public.accounts enable row level security;
 alter table public.studios enable row level security;
 alter table public.speakers enable row level security;
 alter table public.slots enable row level security;
+alter table public.city_proximities enable row level security;
 alter table public.schedule_requests enable row level security;
 alter table public.bookings enable row level security;
 alter table public.appeals enable row level security;

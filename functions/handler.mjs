@@ -2,7 +2,9 @@
 // Single Function entry: routes by ?action= and HTTP method. All authorization
 // is enforced here. The browser never talks to the database directly.
 import { hashPassword, verifyPassword, signToken, verifyToken, sessionSecret } from "./authlib.mjs";
-import { computeMatches, slotKey } from "./matching.mjs";
+import {
+  computeMatches, isWithinBusinessHours, normalizeBusinessHours, slotKey,
+} from "./matching.mjs";
 
 const json = (body, status = 200, headers = {}) =>
   Response.json(body, { status, headers: { "cache-control": "no-store", ...headers } });
@@ -16,8 +18,36 @@ const uuid = () => crypto.randomUUID();
 // ---- validation ----
 const isDate = (v) => typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v) && !Number.isNaN(Date.parse(v));
 const isHalfHour = (v) => typeof v === "string" && /^([01]\d|2[0-3]):(00|30)$/.test(v);
+const isClosingHalfHour = (v) => isHalfHour(v) || v === "24:00";
 const str = (v, max) => typeof v === "string" && v.trim().length > 0 && v.length <= max;
 const optStr = (v, max) => v === undefined || v === null || (typeof v === "string" && v.length <= max);
+const normalizeCity = (value) => String(value ?? "").normalize("NFKC").trim().replace(/\s+/g, " ");
+
+function halfHourKeys(dates) {
+  const keys = [];
+  for (const date of dates) {
+    for (let minutes = 0; minutes < 24 * 60; minutes += 30) {
+      const hour = String(Math.floor(minutes / 60)).padStart(2, "0");
+      const minute = String(minutes % 60).padStart(2, "0");
+      keys.push(`${date} ${hour}:${minute}`);
+    }
+  }
+  return keys;
+}
+
+function validateBusinessHours(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new HttpError("invalid_business_hours", 400);
+  for (let day = 0; day < 7; day += 1) {
+    const entry = value[String(day)];
+    if (!entry || typeof entry !== "object" || typeof entry.enabled !== "boolean") {
+      throw new HttpError("invalid_business_hours", 400);
+    }
+    if (!isHalfHour(entry.start) || !isClosingHalfHour(entry.end) || entry.start >= entry.end) {
+      throw new HttpError("invalid_business_hours", 400);
+    }
+  }
+  return normalizeBusinessHours(value);
+}
 
 async function readJson(request, maxBytes = 64 * 1024) {
   const buf = await request.arrayBuffer();
@@ -60,6 +90,32 @@ async function listAll(supabase, table, order = "created_at") {
   const { data, error } = await supabase.from(table).select("*").order(order, { ascending: true });
   if (error || !Array.isArray(data)) throw new HttpError("database_request_failed", 503);
   return data;
+}
+async function cityOptions(supabase) {
+  const studios = await listAll(supabase, "studios");
+  const counts = new Map();
+  for (const studio of studios) {
+    const city = normalizeCity(studio.city);
+    if (city) counts.set(city, (counts.get(city) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([name, studio_count]) => ({ name, studio_count }));
+}
+async function requestPreferences(supabase, rawCities, rawMode) {
+  if (rawCities !== undefined && (!Array.isArray(rawCities) || rawCities.length > 20)) {
+    throw new HttpError("invalid_city", 400);
+  }
+  const preferredCities = [...new Set((rawCities ?? []).map(normalizeCity).filter(Boolean))];
+  if (preferredCities.some((city) => city.length > 64)) throw new HttpError("invalid_city", 400);
+  const available = new Set((await cityOptions(supabase)).map((city) => city.name));
+  if (preferredCities.some((city) => !available.has(city))) throw new HttpError("invalid_city", 400);
+  const matchMode = rawMode === undefined ? "schedule_first" : rawMode;
+  if (!["schedule_first", "location_first"].includes(matchMode)) throw new HttpError("invalid_body", 400);
+  return {
+    preferredCities,
+    matchMode: matchMode === "location_first" && preferredCities.length === 0 ? "schedule_first" : matchMode,
+  };
 }
 async function notify(supabase, accountId, kind, message) {
   await supabase.from("notifications").insert({
@@ -105,10 +161,13 @@ export async function handleApp({ request, supabase }) {
       case "admin/create-account": return await adminCreateAccount(request, supabase);
       case "admin/delete-account": return await adminDeleteAccount(request, supabase);
       case "admin/note": return await adminNote(request, supabase);
+      case "admin/city-proximity/save": return await adminSaveCityProximity(request, supabase);
+      case "admin/city-proximity/delete": return await adminDeleteCityProximity(request, supabase);
       case "admin/resolve-appeal": return await adminResolveAppeal(request, supabase);
       // studio
       case "studio/me": return await studioMe(request, supabase);
       case "studio/setup": return await studioSetup(request, supabase);
+      case "studio/business-hours": return await studioBusinessHours(request, supabase);
       case "studio/slots": return await studioSlots(request, supabase);
       case "studio/slots/set": return await studioSlotsSet(request, supabase);
       case "studio/bookings": return await studioBookings(request, supabase);
@@ -117,7 +176,9 @@ export async function handleApp({ request, supabase }) {
       case "vendor/speakers": return await vendorSpeakers(request, supabase);
       case "vendor/speaker/create": return await vendorCreateSpeaker(request, supabase);
       case "vendor/requests": return await vendorRequests(request, supabase);
+      case "vendor/match-options": return await vendorMatchOptions(request, supabase);
       case "vendor/request/create": return await vendorCreateRequest(request, supabase);
+      case "vendor/request/update": return await vendorUpdateRequest(request, supabase);
       case "vendor/request/matches": return await vendorRequestMatches(request, supabase);
       case "vendor/book": return await vendorBook(request, supabase);
       case "vendor/bookings": return await vendorBookings(request, supabase);
@@ -198,7 +259,7 @@ async function adminOverview(request, supabase) {
   requireMethod(request, "GET");
   const account = await authenticate(request, supabase);
   requireRole(account, "admin");
-  const [accounts, studios, speakers, slots, requests, bookings, appeals] = await Promise.all([
+  const [accounts, studios, speakers, slots, requests, bookings, appeals, cityProximities] = await Promise.all([
     listAll(supabase, "accounts"),
     listAll(supabase, "studios"),
     listAll(supabase, "speakers"),
@@ -206,11 +267,12 @@ async function adminOverview(request, supabase) {
     listAll(supabase, "schedule_requests"),
     listAll(supabase, "bookings"),
     listAll(supabase, "appeals"),
+    listAll(supabase, "city_proximities"),
   ]);
   return json({
     ok: true,
     accounts: accounts.map((a) => ({ ...publicAccount(a), admin_note: a.admin_note, created_at: a.created_at })),
-    studios, speakers, slots, requests, bookings, appeals,
+    studios, speakers, slots, requests, bookings, appeals, city_proximities: cityProximities,
   });
 }
 
@@ -223,14 +285,43 @@ async function adminCreateAccount(request, supabase) {
   if (!["studio", "vendor", "admin"].includes(role)) throw new HttpError("invalid_body", 400);
   if (!str(body.username, 64) || !str(body.password, 256) || body.password.length < 6) throw new HttpError("invalid_body", 400);
   if (!optStr(body.display_name, 128) || !optStr(body.email, 256)) throw new HttpError("invalid_body", 400);
+  if (["studio", "vendor"].includes(role) && (!str(body.display_name, 128) || !str(body.email, 256))) {
+    throw new HttpError("invalid_body", 400);
+  }
+  const city = normalizeCity(body.city);
+  if (role === "studio" && (!city || city.length > 64 || !str(body.address, 256))) {
+    throw new HttpError("invalid_body", 400);
+  }
   if (await findAccountByUsername(supabase, body.username.trim())) throw new HttpError("username_taken", 409);
+
   const id = uuid();
+  const displayName = body.display_name?.trim() ?? "";
+  const email = body.email?.trim() ?? "";
   const { error } = await supabase.from("accounts").insert({
     id, username: body.username.trim(), password_hash: await hashPassword(body.password), role,
-    display_name: body.display_name ?? "", email: body.email ?? "", admin_note: "", created_at: NOW(),
+    display_name: displayName, email, admin_note: "", created_at: NOW(),
   });
   if (error) throw new HttpError("username_taken", 409);
-  return json({ ok: true, account: publicAccount({ id, username: body.username.trim(), role, display_name: body.display_name ?? "", email: body.email ?? "" }) });
+
+  let studio = null;
+  if (role === "studio") {
+    const { data, error: studioError } = await supabase.from("studios").insert({
+      id: uuid(), account_id: id, name: displayName, city,
+      address: body.address.trim(), email, admin_note: "",
+      business_hours: normalizeBusinessHours(), created_at: NOW(),
+    }).select("*").single();
+    if (studioError || !data) {
+      await supabase.from("accounts").delete().eq("id", id);
+      throw new HttpError("database_request_failed", 503);
+    }
+    studio = data;
+  }
+
+  return json({
+    ok: true,
+    account: publicAccount({ id, username: body.username.trim(), role, display_name: displayName, email }),
+    studio,
+  });
 }
 
 async function adminDeleteAccount(request, supabase) {
@@ -242,10 +333,10 @@ async function adminDeleteAccount(request, supabase) {
   if (body.account_id === account.id) throw new HttpError("cannot_delete_self", 400);
   const target = await findAccountById(supabase, body.account_id);
   if (!target) throw new HttpError("not_found", 404);
-  // Remove owned studio and its free slots; keep historical bookings/appeals intact.
+  // Remove unbooked availability overrides; keep historical bookings/appeals intact.
   const studio = await studioForAccount(supabase, target.id);
   if (studio) {
-    await supabase.from("slots").delete().eq("studio_id", studio.id).eq("status", "free");
+    await supabase.from("slots").delete().eq("studio_id", studio.id).neq("status", "locked");
     await supabase.from("studios").delete().eq("id", studio.id);
   }
   await supabase.from("accounts").delete().eq("id", target.id);
@@ -261,6 +352,42 @@ async function adminNote(request, supabase) {
   if (!table || !str(body.target_id, 64) || !optStr(body.admin_note, 2000)) throw new HttpError("invalid_body", 400);
   const { error } = await supabase.from(table).update({ admin_note: body.admin_note ?? "" }).eq("id", body.target_id);
   if (error) throw new HttpError("database_request_failed", 503);
+  return json({ ok: true });
+}
+
+async function adminSaveCityProximity(request, supabase) {
+  requireMethod(request, "POST");
+  const account = await authenticate(request, supabase);
+  requireRole(account, "admin");
+  const body = await readJson(request);
+  const city = normalizeCity(body.city);
+  const nearbyCity = normalizeCity(body.nearby_city);
+  const priority = Number(body.priority);
+  const available = new Set((await cityOptions(supabase)).map((item) => item.name));
+  if (!city || !nearbyCity || city === nearbyCity || !available.has(city) || !available.has(nearbyCity)
+    || !Number.isInteger(priority) || priority < 1 || priority > 999) {
+    throw new HttpError("invalid_city", 400);
+  }
+  const { data: existing } = await supabase.from("city_proximities").select("*")
+    .eq("city", city).eq("nearby_city", nearbyCity).maybeSingle();
+  if (existing) {
+    await supabase.from("city_proximities").update({ priority }).eq("id", existing.id);
+    return json({ ok: true, relation_id: existing.id });
+  }
+  const id = uuid();
+  await supabase.from("city_proximities").insert({
+    id, city, nearby_city: nearbyCity, priority, created_at: NOW(),
+  });
+  return json({ ok: true, relation_id: id });
+}
+
+async function adminDeleteCityProximity(request, supabase) {
+  requireMethod(request, "POST");
+  const account = await authenticate(request, supabase);
+  requireRole(account, "admin");
+  const body = await readJson(request);
+  if (!str(body.relation_id, 64)) throw new HttpError("invalid_body", 400);
+  await supabase.from("city_proximities").delete().eq("id", body.relation_id);
   return json({ ok: true });
 }
 
@@ -283,7 +410,7 @@ async function adminResolveAppeal(request, supabase) {
   // approved: release the booking, free its slots, reopen the request for the vendor.
   const { data: booking } = await supabase.from("bookings").select("*").eq("id", appeal.booking_id).maybeSingle();
   if (!booking) throw new HttpError("not_found", 404);
-  await supabase.from("slots").update({ status: "free", booking_id: null }).eq("booking_id", booking.id);
+  await supabase.from("slots").delete().eq("booking_id", booking.id);
   await supabase.from("bookings").update({ status: "released" }).eq("id", booking.id);
   await supabase.from("appeals").update({ status: "approved", resolved_at: NOW() }).eq("id", appeal.id);
 
@@ -322,22 +449,36 @@ async function studioSetup(request, supabase) {
   if (!str(body.name, 128) || !str(body.city, 64) || !str(body.address, 256) || !str(body.email, 256)) {
     throw new HttpError("invalid_body", 400);
   }
+  const city = normalizeCity(body.city);
   const existing = await studioForAccount(supabase, account.id);
   if (existing) {
     // Location and name are remembered; allow correction but keep the same record.
     await supabase.from("studios").update({
-      name: body.name.trim(), city: body.city.trim(), address: body.address.trim(), email: body.email.trim(),
+      name: body.name.trim(), city, address: body.address.trim(), email: body.email.trim(),
     }).eq("id", existing.id);
     const updated = await studioForAccount(supabase, account.id);
     return json({ ok: true, studio: updated });
   }
   const id = uuid();
   await supabase.from("studios").insert({
-    id, account_id: account.id, name: body.name.trim(), city: body.city.trim(),
-    address: body.address.trim(), email: body.email.trim(), admin_note: "", created_at: NOW(),
+    id, account_id: account.id, name: body.name.trim(), city,
+    address: body.address.trim(), email: body.email.trim(), admin_note: "",
+    business_hours: normalizeBusinessHours(), created_at: NOW(),
   });
   const studio = await studioForAccount(supabase, account.id);
   return json({ ok: true, studio });
+}
+
+async function studioBusinessHours(request, supabase) {
+  requireMethod(request, "POST");
+  const account = await authenticate(request, supabase);
+  requireRole(account, "studio");
+  const studio = await studioForAccount(supabase, account.id);
+  if (!studio) throw new HttpError("needs_setup", 409);
+  const body = await readJson(request);
+  const businessHours = validateBusinessHours(body.business_hours);
+  await supabase.from("studios").update({ business_hours: businessHours }).eq("id", studio.id);
+  return json({ ok: true, business_hours: businessHours });
 }
 
 async function studioSlots(request, supabase) {
@@ -369,17 +510,22 @@ async function studioSlotsSet(request, supabase) {
   for (const c of changes) {
     const { data: existing } = await supabase.from("slots").select("*")
       .eq("studio_id", studio.id).eq("date", c.date).eq("start", c.start).maybeSingle();
-    if (c.available) {
-      if (!existing) {
-        await supabase.from("slots").insert({
-          id: uuid(), studio_id: studio.id, date: c.date, start: c.start,
-          status: "free", booking_id: null, created_at: NOW(),
-        });
-      }
+    if (existing?.status === "locked") {
+      skipped.push({ date: c.date, start: c.start });
+      continue;
+    }
+    const regular = isWithinBusinessHours(studio.business_hours, c.date, c.start);
+    const overrideStatus = c.available ? "free" : "blocked";
+    const needsOverride = c.available !== regular;
+    if (!needsOverride) {
+      if (existing) await supabase.from("slots").delete().eq("id", existing.id);
+    } else if (existing) {
+      await supabase.from("slots").update({ status: overrideStatus, booking_id: null }).eq("id", existing.id);
     } else {
-      // Cannot withdraw a locked slot; must appeal instead.
-      if (existing && existing.status === "locked") skipped.push({ date: c.date, start: c.start });
-      else if (existing) await supabase.from("slots").delete().eq("id", existing.id);
+      await supabase.from("slots").insert({
+        id: uuid(), studio_id: studio.id, date: c.date, start: c.start,
+        status: overrideStatus, booking_id: null, created_at: NOW(),
+      });
     }
   }
   const { data } = await supabase.from("slots").select("*").eq("studio_id", studio.id);
@@ -473,6 +619,13 @@ function validateDesired(raw) {
   return [...keys];
 }
 
+async function vendorMatchOptions(request, supabase) {
+  requireMethod(request, "GET");
+  const account = await authenticate(request, supabase);
+  requireRole(account, "vendor");
+  return json({ ok: true, cities: await cityOptions(supabase), default_match_mode: "schedule_first" });
+}
+
 async function vendorCreateRequest(request, supabase) {
   requireMethod(request, "POST");
   const account = await authenticate(request, supabase);
@@ -482,13 +635,36 @@ async function vendorCreateRequest(request, supabase) {
   const { data: speaker } = await supabase.from("speakers").select("*").eq("id", body.speaker_id).maybeSingle();
   if (!speaker || speaker.vendor_account_id !== account.id) throw new HttpError("not_found", 404);
   const desired = validateDesired(body.slots);
+  const { preferredCities, matchMode } = await requestPreferences(supabase, body.preferred_cities, body.match_mode);
   const id = uuid();
   await supabase.from("schedule_requests").insert({
-    id, speaker_id: speaker.id, vendor_account_id: account.id,
-    desired, status: "open", created_at: NOW(),
+    id, speaker_id: speaker.id, vendor_account_id: account.id, desired,
+    preferred_cities: preferredCities, match_mode: matchMode, status: "open", created_at: NOW(),
   });
-  const matches = await matchesForRequest(supabase, desired);
+  const matches = await matchesForRequest(supabase, desired, preferredCities, matchMode);
   return json({ ok: true, request_id: id, ...matches });
+}
+
+async function vendorUpdateRequest(request, supabase) {
+  requireMethod(request, "POST");
+  const account = await authenticate(request, supabase);
+  requireRole(account, "vendor");
+  const body = await readJson(request);
+  if (!str(body.request_id, 64)) throw new HttpError("invalid_body", 400);
+  const { data: req } = await supabase.from("schedule_requests").select("*").eq("id", body.request_id).maybeSingle();
+  if (!req || req.vendor_account_id !== account.id) throw new HttpError("not_found", 404);
+  if (req.status !== "open" && req.status !== "reopened") throw new HttpError("invalid_state", 409);
+  const desired = validateDesired(body.slots);
+  const { preferredCities, matchMode } = await requestPreferences(
+    supabase,
+    body.preferred_cities ?? req.preferred_cities ?? [],
+    body.match_mode ?? req.match_mode ?? "schedule_first",
+  );
+  await supabase.from("schedule_requests").update({
+    desired, preferred_cities: preferredCities, match_mode: matchMode,
+  }).eq("id", req.id);
+  const matches = await matchesForRequest(supabase, desired, preferredCities, matchMode);
+  return json({ ok: true, request_id: req.id, status: req.status, ...matches });
 }
 
 async function vendorRequestMatches(request, supabase) {
@@ -499,24 +675,43 @@ async function vendorRequestMatches(request, supabase) {
   if (!str(id, 64)) throw new HttpError("invalid_body", 400);
   const { data: req } = await supabase.from("schedule_requests").select("*").eq("id", id).maybeSingle();
   if (!req || req.vendor_account_id !== account.id) throw new HttpError("not_found", 404);
-  const matches = await matchesForRequest(supabase, req.desired ?? []);
-  return json({ ok: true, request_id: id, status: req.status, desired: req.desired ?? [], ...matches });
+  const preferredCities = req.preferred_cities ?? [];
+  const matchMode = req.match_mode ?? "schedule_first";
+  const matches = await matchesForRequest(supabase, req.desired ?? [], preferredCities, matchMode);
+  return json({ ok: true, request_id: id, status: req.status, ...matches });
 }
 
-async function matchesForRequest(supabase, desiredKeys) {
-  if (desiredKeys.length === 0) return { fullCover: [], partial: [], combination: null, desired: [] };
-  const dates = [...new Set(desiredKeys.map((k) => k.split(" ")[0]))];
-  const { data: freeSlots } = await supabase.from("slots").select("*").eq("status", "free").in("date", dates);
-  const studios = await listAll(supabase, "studios");
-  const freeByStudio = new Map();
-  for (const s of freeSlots ?? []) {
-    if (!freeByStudio.has(s.studio_id)) freeByStudio.set(s.studio_id, []);
-    freeByStudio.get(s.studio_id).push(`${s.date} ${s.start}`);
+async function matchesForRequest(supabase, desiredKeys, preferredCities = [], matchMode = "schedule_first") {
+  if (desiredKeys.length === 0) {
+    return {
+      tier: "P2", p0: [], p1: [], fullCover: [], partial: [], combination: null,
+      desired: [], preferredCities, matchMode, effectiveMode: matchMode, adjustmentOptions: [],
+    };
   }
-  const studioInputs = studios
-    .filter((s) => freeByStudio.has(s.id))
-    .map((s) => ({ id: s.id, name: s.name, city: s.city, address: s.address, freeKeys: freeByStudio.get(s.id) }));
-  return computeMatches(desiredKeys, studioInputs);
+  const dates = [...new Set(desiredKeys.map((key) => key.split(" ")[0]))];
+  const [{ data: slotRows, error: slotError }, studios, proximities] = await Promise.all([
+    supabase.from("slots").select("*").in("date", dates),
+    listAll(supabase, "studios"),
+    listAll(supabase, "city_proximities"),
+  ]);
+  if (slotError || !Array.isArray(slotRows)) throw new HttpError("database_request_failed", 503);
+  const overridesByStudio = new Map();
+  for (const slot of slotRows) {
+    if (!overridesByStudio.has(slot.studio_id)) overridesByStudio.set(slot.studio_id, new Map());
+    overridesByStudio.get(slot.studio_id).set(`${slot.date} ${slot.start}`, slot.status);
+  }
+  const candidateKeys = halfHourKeys(dates);
+  const studioInputs = studios.map((studio) => ({
+    id: studio.id, name: studio.name, city: studio.city, address: studio.address,
+    freeKeys: candidateKeys.filter((key) => {
+      const status = overridesByStudio.get(studio.id)?.get(key);
+      if (status === "free") return true;
+      if (status === "blocked" || status === "locked") return false;
+      const [date, start] = key.split(" ");
+      return isWithinBusinessHours(studio.business_hours, date, start);
+    }),
+  }));
+  return computeMatches(desiredKeys, studioInputs, { preferredCities, matchMode, proximities });
 }
 
 async function vendorBook(request, supabase) {
@@ -534,14 +729,23 @@ async function vendorBook(request, supabase) {
   const desired = new Set(req.desired ?? []);
   const bookingId = uuid();
   const locked = [];
-  // Lock each desired slot that is still free for this studio (best-effort per slot).
   for (const key of desired) {
     const [date, start] = key.split(" ");
-    const { data: rows } = await supabase.from("slots")
-      .update({ status: "locked", booking_id: bookingId })
-      .eq("studio_id", studio.id).eq("date", date).eq("start", start).eq("status", "free")
-      .select("id");
-    if (Array.isArray(rows) && rows.length > 0) locked.push(key);
+    const { data: existing } = await supabase.from("slots").select("*")
+      .eq("studio_id", studio.id).eq("date", date).eq("start", start).maybeSingle();
+    if (existing?.status === "blocked" || existing?.status === "locked") continue;
+    if (existing?.status === "free") {
+      const { data: rows } = await supabase.from("slots")
+        .update({ status: "locked", booking_id: bookingId })
+        .eq("id", existing.id).eq("status", "free").select("id");
+      if (Array.isArray(rows) && rows.length > 0) locked.push(key);
+    } else if (!existing && isWithinBusinessHours(studio.business_hours, date, start)) {
+      const { data: rows, error } = await supabase.from("slots").insert({
+        id: uuid(), studio_id: studio.id, date, start,
+        status: "locked", booking_id: bookingId, created_at: NOW(),
+      }).select("id");
+      if (!error && Array.isArray(rows) && rows.length > 0) locked.push(key);
+    }
   }
   if (locked.length === 0) throw new HttpError("no_availability", 409);
 

@@ -40,7 +40,7 @@ export function NotificationBell() {
     <div className="relative" ref={ref}>
       <button
         onClick={() => setOpen((v) => !v)}
-        className="relative rounded-md border border-input px-3 py-2 text-sm hover:bg-accent"
+        className="relative whitespace-nowrap rounded-md border border-input px-3 py-2 text-sm hover:bg-accent"
       >
         通知
         {unread > 0 && (
@@ -48,7 +48,7 @@ export function NotificationBell() {
         )}
       </button>
       {open && (
-        <div className="absolute right-0 mt-2 max-h-96 w-80 overflow-y-auto rounded-lg border border-border bg-popover p-2 shadow-lg">
+        <div className="absolute right-0 mt-2 max-h-96 w-[calc(100vw-2rem)] max-w-80 overflow-y-auto rounded-lg border border-border bg-popover p-2 shadow-lg">
           {items.length === 0 && <p className="p-4 text-center text-sm text-muted-foreground">暂无通知</p>}
           {items.map((n) => (
             <button

@@ -2,30 +2,13 @@
 import { hashPassword } from "../functions/authlib.mjs";
 
 const NOW = () => new Date().toISOString();
-
-function slotRows(studioId, date, starts) {
-  return starts.map((start) => ({
-    id: crypto.randomUUID(), studio_id: studioId, date, start,
-    status: "free", booking_id: null, created_at: NOW(),
-  }));
-}
-
-// Half-hour starts between from and to (exclusive of `to`).
-function range(from, to) {
-  const out = [];
-  let [h, m] = from.split(":").map(Number);
-  const [th, tm] = to.split(":").map(Number);
-  while (h < th || (h === th && m < tm)) {
-    out.push(`${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`);
-    m += 30;
-    if (m >= 60) { m = 0; h += 1; }
-  }
-  return out;
-}
+const BUSINESS_HOURS = Object.fromEntries(Array.from({ length: 7 }, (_, day) => [
+  String(day), { enabled: true, start: "08:00", end: "22:00" },
+]));
 
 export async function buildSeed() {
   const db = {
-    accounts: [], studios: [], speakers: [], slots: [],
+    accounts: [], studios: [], speakers: [], slots: [], city_proximities: [],
     schedule_requests: [], bookings: [], appeals: [], notifications: [],
   };
 
@@ -46,20 +29,16 @@ export async function buildSeed() {
 
   const mkStudio = (accountId, name, city, address) => {
     const id = crypto.randomUUID();
-    db.studios.push({ id, account_id: accountId, name, city, address, email: "", admin_note: "", created_at: NOW() });
+    db.studios.push({
+      id, account_id: accountId, name, city, address, email: "", admin_note: "",
+      business_hours: structuredClone(BUSINESS_HOURS), created_at: NOW(),
+    });
     return id;
   };
 
-  const sBjA = mkStudio(bjA, "声界·朝阳棚", "北京", "北京市朝阳区建国路88号");
-  const sBjB = mkStudio(bjB, "回声·海淀棚", "北京", "北京市海淀区中关村大街1号");
-  const sSh = mkStudio(sh, "静音·徐汇棚", "上海", "上海市徐汇区漕溪北路100号");
-
-  const D1 = "2026-09-25";
-  const D2 = "2026-09-26";
-  db.slots.push(...slotRows(sBjA, D1, range("09:00", "12:00")));
-  db.slots.push(...slotRows(sBjB, D1, range("14:00", "17:00")));
-  db.slots.push(...slotRows(sBjB, D2, range("09:00", "11:00")));
-  db.slots.push(...slotRows(sSh, D1, range("09:00", "18:00")));
+  mkStudio(bjA, "声界·朝阳棚", "北京", "北京市朝阳区建国路88号");
+  mkStudio(bjB, "回声·海淀棚", "北京", "北京市海淀区中关村大街1号");
+  mkStudio(sh, "静音·徐汇棚", "上海", "上海市徐汇区漕溪北路100号");
 
   // one demo speaker under the vendor
   db.speakers.push({

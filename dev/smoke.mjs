@@ -1,4 +1,4 @@
-const BASE = "http://127.0.0.1:8000/functions/v1/app";
+const BASE = process.env.APP_BASE_URL ?? "http://127.0.0.1:8000/functions/v1/app";
 const j = (r) => r.json();
 async function post(action, token, body) {
   const h = { "content-type": "application/json" };
@@ -29,9 +29,9 @@ console.log("fullCover:", req.fullCover.map((x) => x.name));
 console.log("partial:", req.partial.map((x) => `${x.name}(${x.covered.length})`));
 console.log("combination:", JSON.stringify(req.combination?.studios.map((s) => `${s.name}->${s.assigned.length}`)), "coversAll:", req.combination?.coversAll, "uncovered:", req.combination?.uncovered);
 
-// Book the combination-first studio (SH covers all 4? SH has 09-18 on D1, so full cover)
+// Book the Shanghai studio so the matching studio login below can verify the reservation.
 console.log("--- booking full-cover studio ---");
-const target = req.fullCover[0] ?? req.combination.studios[0];
+const target = req.fullCover.find((studio) => studio.city === "上海") ?? req.fullCover[0] ?? req.combination.studios[0];
 const book = await post("vendor/book", VT, { request_id: req.request_id, studio_id: target.studioId });
 console.log("locked:", book.locked?.length, "remaining:", book.remaining);
 

@@ -10,6 +10,14 @@ export interface Account {
   created_at?: string;
 }
 
+export interface BusinessDay {
+  enabled: boolean;
+  start: string;
+  end: string;
+}
+
+export type BusinessHours = Record<string, BusinessDay>;
+
 export interface Studio {
   id: string;
   account_id: string;
@@ -17,6 +25,7 @@ export interface Studio {
   city: string;
   address: string;
   email: string;
+  business_hours?: BusinessHours;
   admin_note?: string;
 }
 
@@ -34,7 +43,7 @@ export interface Slot {
   studio_id: string;
   date: string;
   start: string;
-  status: "free" | "locked";
+  status: "free" | "blocked" | "locked";
   booking_id: string | null;
 }
 
@@ -64,11 +73,17 @@ export interface Appeal {
   resolved_at: string | null;
 }
 
+export type MatchMode = "schedule_first" | "location_first";
+export type MatchTier = "P0" | "P1" | "P2";
+export type LocationLevel = "preferred" | "nearby" | "other" | "neutral";
+
 export interface ScheduleRequest {
   id: string;
   speaker_id: string;
   vendor_account_id: string;
   desired: string[];
+  preferred_cities?: string[];
+  match_mode?: MatchMode;
   status: "open" | "reopened" | "closed";
   created_at: string;
 }
@@ -82,26 +97,69 @@ export interface Notification {
   created_at: string;
 }
 
+export interface MatchLocation {
+  level: LocationLevel;
+  rank: number;
+  nearbyTo: string | null;
+  priority: number | null;
+}
+
 export interface StudioMatch {
   studioId: string;
   name: string;
   city: string;
   address: string;
   covered: string[];
-  missing?: string[];
+  missing: string[];
+  location: MatchLocation;
+  reasonCodes: string[];
+  alternativeSlots?: string[];
 }
 
 export interface Combination {
-  studios: { studioId: string; name: string; city: string; address: string; assigned: string[] }[];
+  studios: {
+    studioId: string;
+    name: string;
+    city: string;
+    address: string;
+    assigned: string[];
+    location: MatchLocation;
+    reasonCodes: string[];
+  }[];
   coversAll: boolean;
   covered: string[];
   uncovered: string[];
 }
 
+export interface AdjustmentOption {
+  studioId: string;
+  name: string;
+  city: string;
+  address: string;
+  location: MatchLocation;
+  available: string[];
+  reasonCodes: string[];
+}
+
+export interface CityProximity {
+  id: string;
+  city: string;
+  nearby_city: string;
+  priority: number;
+  created_at?: string;
+}
+
 export interface MatchResult {
   request_id: string;
   desired: string[];
+  preferredCities: string[];
+  matchMode: MatchMode;
+  effectiveMode: MatchMode;
+  tier: MatchTier;
+  p0: StudioMatch[];
+  p1: StudioMatch[];
   fullCover: StudioMatch[];
   partial: StudioMatch[];
   combination: Combination | null;
+  adjustmentOptions: AdjustmentOption[];
 }

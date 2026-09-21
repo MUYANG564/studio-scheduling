@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, ApiError } from "../api";
-import type { Account, Appeal, Booking, ScheduleRequest, Slot, Speaker, Studio } from "../types";
+import type { Account, Appeal, Booking, CityProximity, ScheduleRequest, Slot, Speaker, Studio } from "../types";
 import { Button, Card, EmptyState, Field, Input, SectionTitle, Badge, Spinner, Textarea } from "../ui";
 import { SlotChips } from "./Studio";
 import { cn } from "@/lib/utils";
@@ -13,6 +13,7 @@ interface Overview {
   requests: ScheduleRequest[];
   bookings: Booking[];
   appeals: Appeal[];
+  city_proximities: CityProximity[];
 }
 
 const TABS = [
@@ -20,6 +21,7 @@ const TABS = [
   ["studios", "录音棚"],
   ["speakers", "发音人"],
   ["bookings", "预约总览"],
+  ["cities", "邻近城市"],
   ["accounts", "账号管理"],
 ] as const;
 
@@ -61,6 +63,7 @@ export function AdminDashboard() {
       {tab === "studios" && <StudiosTab data={data} onChanged={reload} />}
       {tab === "speakers" && <SpeakersTab data={data} onChanged={reload} />}
       {tab === "bookings" && <BookingsTab data={data} />}
+      {tab === "cities" && <CityProximitiesTab data={data} onChanged={reload} />}
       {tab === "accounts" && <AccountsTab data={data} onChanged={reload} />}
     </div>
   );
@@ -204,11 +207,115 @@ function BookingsTab({ data }: { data: Overview }) {
   );
 }
 
-function AccountsTab({ data, onChanged }: { data: Overview; onChanged: () => void }) {
-  const [open, setOpen] = useState(false);
-  const [form, setForm] = useState({ role: "studio", username: "", password: "", display_name: "", email: "" });
+function CityProximitiesTab({ data, onChanged }: { data: Overview; onChanged: () => void }) {
+  const cities = [...new Set(data.studios.map((studio) => studio.city.trim()).filter(Boolean))].sort();
+  const [city, setCity] = useState(cities[0] ?? "");
+  const [nearbyCity, setNearbyCity] = useState(cities.find((item) => item !== cities[0]) ?? "");
+  const [priority, setPriority] = useState("1");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+
+  const save = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setBusy(true); setErr("");
+    try {
+      await api.post("admin/city-proximity/save", {
+        city,
+        nearby_city: nearbyCity,
+        priority: Number(priority),
+      });
+      await onChanged();
+    } catch (error) { setErr(error instanceof ApiError ? error.message : "保存失败"); }
+    finally { setBusy(false); }
+  };
+
+  const remove = async (id: string) => {
+    setBusy(true); setErr("");
+    try {
+      await api.post("admin/city-proximity/delete", { relation_id: id });
+      await onChanged();
+    } catch (error) { setErr(error instanceof ApiError ? error.message : "删除失败"); }
+    finally { setBusy(false); }
+  };
+
+  const grouped = useMemo(() => {
+    const map = new Map<string, CityProximity[]>();
+    for (const relation of data.city_proximities ?? []) {
+      const rows = map.get(relation.city) ?? [];
+      rows.push(relation);
+      map.set(relation.city, rows);
+    }
+    for (const rows of map.values()) rows.sort((a, b) => a.priority - b.priority || a.nearby_city.localeCompare(b.nearby_city));
+    return map;
+  }, [data.city_proximities]);
+
+  if (cities.length < 2) {
+    return <EmptyState>至少需要两个录音棚城市，才能设置邻近关系。请先让录音棚完善城市信息。</EmptyState>;
+  }
+
+  return (
+    <div className="grid gap-5 lg:grid-cols-[22rem_1fr]">
+      <Card>
+        <SectionTitle>新增邻近关系</SectionTitle>
+        <p className="mb-4 text-sm text-muted-foreground">关系有方向。例如设置“北京 → 天津”，表示供应商选北京时会优先推荐天津；反方向需要另建一条。</p>
+        <form onSubmit={save} className="flex flex-col gap-4">
+          <Field label="意向城市">
+            <select value={city} onChange={(event) => {
+              const nextCity = event.target.value;
+              setCity(nextCity);
+              if (nearbyCity === nextCity) setNearbyCity(cities.find((item) => item !== nextCity) ?? "");
+            }} className="h-10 rounded-md border border-input bg-background px-3 text-sm">
+              {cities.map((item) => <option key={item}>{item}</option>)}
+            </select>
+          </Field>
+          <Field label="邻近城市">
+            <select value={nearbyCity} onChange={(event) => setNearbyCity(event.target.value)} className="h-10 rounded-md border border-input bg-background px-3 text-sm">
+              {cities.filter((item) => item !== city).map((item) => <option key={item}>{item}</option>)}
+            </select>
+          </Field>
+          <Field label="优先级" hint="数字越小越优先，例如 1 最优先、2 次之。">
+            <Input type="number" min="1" max="999" value={priority} onChange={(event) => setPriority(event.target.value)} required />
+          </Field>
+          {err && <p className="text-sm text-destructive">{err}</p>}
+          <Button type="submit" disabled={busy || !city || !nearbyCity || city === nearbyCity}>{busy ? "保存中…" : "保存邻近关系"}</Button>
+        </form>
+      </Card>
+
+      <Card>
+        <SectionTitle>已设置的城市关系</SectionTitle>
+        {grouped.size === 0 ? <EmptyState>还没有设置。供应商匹配时只区分意向城市和其他城市。</EmptyState> : (
+          <div className="flex flex-col gap-4">
+            {[...grouped.entries()].map(([source, relations]) => (
+              <div key={source} className="rounded-xl border border-border p-4">
+                <p className="font-semibold">供应商意向：{source}</p>
+                <div className="mt-3 flex flex-col gap-2">
+                  {relations.map((relation) => (
+                    <div key={relation.id} className="flex items-center justify-between rounded-lg bg-neutral-50 px-3 py-2 text-sm">
+                      <span>第 {relation.priority} 优先：<b>{relation.nearby_city}</b></span>
+                      <Button variant="ghost" disabled={busy} onClick={() => remove(relation.id)}>删除</Button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
+    </div>
+  );
+}
+
+const EMPTY_ACCOUNT_FORM = {
+  role: "studio", username: "", password: "", display_name: "", email: "", city: "", address: "",
+};
+
+function AccountsTab({ data, onChanged }: { data: Overview; onChanged: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [form, setForm] = useState(EMPTY_ACCOUNT_FORM);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const studioByAccount = useMemo(() => new Map(data.studios.map((studio) => [studio.account_id, studio])), [data.studios]);
+  const needsProfile = form.role === "studio" || form.role === "vendor";
 
   const create = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -217,8 +324,9 @@ function AccountsTab({ data, onChanged }: { data: Overview; onChanged: () => voi
       await api.post("admin/create-account", {
         role: form.role, username: form.username.trim(), password: form.password,
         display_name: form.display_name.trim(), email: form.email.trim(),
+        city: form.city.trim(), address: form.address.trim(),
       });
-      setForm({ role: "studio", username: "", password: "", display_name: "", email: "" });
+      setForm(EMPTY_ACCOUNT_FORM);
       setOpen(false);
       await onChanged();
     } catch (e2) { setErr(e2 instanceof ApiError ? e2.message : "创建失败"); }
@@ -232,6 +340,7 @@ function AccountsTab({ data, onChanged }: { data: Overview; onChanged: () => voi
   };
 
   const roleLabel: Record<string, string> = { admin: "后台", studio: "录音棚", vendor: "发音人供应商" };
+  const nameLabel = form.role === "studio" ? "录音棚名称" : form.role === "vendor" ? "供应商名称" : "显示名称";
 
   return (
     <div className="flex flex-col gap-4">
@@ -239,6 +348,7 @@ function AccountsTab({ data, onChanged }: { data: Overview; onChanged: () => voi
         <SectionTitle right={<Button onClick={() => setOpen((v) => !v)}>{open ? "取消" : "新增账号"}</Button>}>账号列表</SectionTitle>
         {open && (
           <form onSubmit={create} className="mb-4 grid gap-3 rounded-lg border border-border p-4 sm:grid-cols-2">
+            <p className="text-sm text-muted-foreground sm:col-span-2">创建登录账号时同步录入资料；录音棚创建后可直接维护营业时间和档期。</p>
             <Field label="角色">
               <select value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })}
                 className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm">
@@ -248,26 +358,37 @@ function AccountsTab({ data, onChanged }: { data: Overview; onChanged: () => voi
               </select>
             </Field>
             <Field label="用户名"><Input value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} required /></Field>
-            <Field label="初始密码" hint="至少 6 位"><Input value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} required /></Field>
-            <Field label="显示名称"><Input value={form.display_name} onChange={(e) => setForm({ ...form, display_name: e.target.value })} /></Field>
-            <Field label="联系邮箱"><Input type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} /></Field>
+            <Field label="初始密码" hint="至少 6 位"><Input type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} required /></Field>
+            <Field label={nameLabel}><Input value={form.display_name} onChange={(e) => setForm({ ...form, display_name: e.target.value })} required={needsProfile} /></Field>
+            <Field label="联系邮箱"><Input type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} required={needsProfile} /></Field>
+            {form.role === "studio" && (
+              <>
+                <Field label="所在城市"><Input value={form.city} onChange={(e) => setForm({ ...form, city: e.target.value })} required /></Field>
+                <Field label="详细地址"><Input value={form.address} onChange={(e) => setForm({ ...form, address: e.target.value })} required /></Field>
+                <p className="text-xs text-muted-foreground sm:col-span-2">默认营业时间为每天 08:00–22:00，创建后可由录音棚自行调整。</p>
+              </>
+            )}
             {err && <p className="text-sm text-destructive sm:col-span-2">{err}</p>}
-            <div className="sm:col-span-2"><Button type="submit" disabled={busy}>{busy ? "创建中…" : "创建账号"}</Button></div>
+            <div className="sm:col-span-2"><Button type="submit" disabled={busy}>{busy ? "创建中…" : needsProfile ? "创建账号并保存资料" : "创建账号"}</Button></div>
           </form>
         )}
         <div className="flex flex-col gap-2">
-          {data.accounts.map((a) => (
-            <div key={a.id} className="rounded-lg border border-border p-3">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="font-medium">{a.username} <Badge tone="gray">{roleLabel[a.role]}</Badge></p>
-                  <p className="text-xs text-muted-foreground">{a.display_name} {a.email && `· ${a.email}`}</p>
+          {data.accounts.map((a) => {
+            const studio = studioByAccount.get(a.id);
+            return (
+              <div key={a.id} className="rounded-lg border border-border p-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <p className="font-medium">{a.username} <Badge tone="gray">{roleLabel[a.role]}</Badge></p>
+                    <p className="text-xs text-muted-foreground">{a.display_name} {a.email && `· ${a.email}`}</p>
+                    {studio && <p className="mt-1 text-xs text-muted-foreground">{studio.city} · {studio.address}</p>}
+                  </div>
+                  <Button variant="outline" onClick={() => del(a.id)}>删除</Button>
                 </div>
-                <Button variant="outline" onClick={() => del(a.id)}>删除</Button>
+                <AdminNote targetType="account" targetId={a.id} value={a.admin_note ?? ""} onSaved={onChanged} />
               </div>
-              <AdminNote targetType="account" targetId={a.id} value={a.admin_note ?? ""} onSaved={onChanged} />
-            </div>
-          ))}
+            );
+          })}
         </div>
       </Card>
     </div>

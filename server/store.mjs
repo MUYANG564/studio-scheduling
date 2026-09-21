@@ -7,7 +7,7 @@ import { mkdir, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
 const TABLES = [
-  "accounts", "studios", "speakers", "slots",
+  "accounts", "studios", "speakers", "slots", "city_proximities",
   "schedule_requests", "bookings", "appeals", "notifications",
 ];
 

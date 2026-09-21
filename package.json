@@ -14,6 +14,7 @@
     "dev": "vite --host 127.0.0.1",
     "dev:local": "node dev/local-server.mjs",
     "build": "tsc --noEmit && node scripts/build.mjs",
+    "test": "node --test functions/*.test.mjs",
     "preview": "vite preview --host 127.0.0.1",
     "start": "node server/index.mjs",
     "create-admin": "node server/create-admin.mjs",
