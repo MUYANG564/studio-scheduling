@@ -1,5 +1,6 @@
 const TOKEN_URL = "https://api.dingtalk.com/v1.0/oauth2/accessToken";
 const API_BASE = "https://api.dingtalk.com";
+const USER_DETAIL_URL = "https://oapi.dingtalk.com/topapi/v2/user/get";
 
 const readEnv = (name) => {
   if (typeof Deno !== "undefined") return Deno.env.get(name);
@@ -57,6 +58,24 @@ export function createDingTalkClient({ env = readEnv, fetchImpl = fetch } = {}) 
     return body.accessToken;
   };
 
+  const resolveOperatorId = async (operatorId, token) => {
+    if (!/^\d+$/.test(operatorId)) return operatorId;
+    const body = await requestJson(
+      fetchImpl,
+      `${USER_DETAIL_URL}?access_token=${encodeURIComponent(token)}`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ userid: operatorId, language: "zh_CN" }),
+      },
+    );
+    const unionId = body?.result?.unionid;
+    if (typeof unionId !== "string" || !unionId) {
+      throw new DingTalkError("dingtalk_export_failed");
+    }
+    return unionId;
+  };
+
   return {
     async createDocument({ title, content }) {
       const settings = config();
@@ -64,6 +83,7 @@ export function createDingTalkClient({ env = readEnv, fetchImpl = fetch } = {}) 
         throw new DingTalkError("dingtalk_not_configured");
       }
       const token = await accessToken(settings);
+      const operatorId = await resolveOperatorId(settings.operatorId, token);
       const headers = {
         "content-type": "application/json",
         "x-acs-dingtalk-access-token": token,
@@ -74,7 +94,7 @@ export function createDingTalkClient({ env = readEnv, fetchImpl = fetch } = {}) 
         {
           method: "POST",
           headers,
-          body: JSON.stringify({ name: title, docType: "DOC", operatorId: settings.operatorId }),
+          body: JSON.stringify({ name: title, docType: "DOC", operatorId }),
         },
       );
       if (typeof created.docKey !== "string" || typeof created.url !== "string") {

@@ -39,6 +39,34 @@ test("DingTalk client creates a document and overwrites it with Markdown", async
   assert.equal(requests[2].init.headers["x-acs-dingtalk-access-token"], "server-token");
 });
 
+test("DingTalk client resolves a numeric userId to unionId", async () => {
+  const requests = [];
+  const responses = [
+    { accessToken: "server-token", expireIn: 7200 },
+    { errcode: 0, errmsg: "ok", result: { unionid: "resolved-union-id" } },
+    { docKey: "document-key", url: "https://alidocs.dingtalk.com/i/nodes/document-key" },
+    { data: true },
+  ];
+  const client = createDingTalkClient({
+    env: (name) => ({ ...envValues, DINGTALK_OPERATOR_ID: "553593" })[name],
+    fetchImpl: async (url, init) => {
+      requests.push({ url, init, body: JSON.parse(init.body) });
+      return Response.json(responses.shift());
+    },
+  });
+
+  await client.createDocument({ title: "数据备份", content: "# 备份" });
+
+  assert.equal(
+    requests[1].url,
+    "https://oapi.dingtalk.com/topapi/v2/user/get?access_token=server-token",
+  );
+  assert.deepEqual(requests[1].body, { userid: "553593", language: "zh_CN" });
+  assert.deepEqual(requests[2].body, {
+    name: "数据备份", docType: "DOC", operatorId: "resolved-union-id",
+  });
+});
+
 test("DingTalk client fails clearly when server configuration is missing", async () => {
   const client = createDingTalkClient({ env: () => "", fetchImpl: async () => { throw new Error("should not fetch"); } });
   await assert.rejects(
