@@ -28,6 +28,90 @@ interface OpenRequest {
   stage_name: string;
 }
 
+type BookingDisplayMode = "studio_first" | "time_first";
+
+interface BookingStudioGroup {
+  key: string;
+  studioName: string;
+  city: string;
+  address: string;
+  firstSlot: string;
+  bookings: Booking[];
+}
+
+interface BookingProjectGroup {
+  key: string;
+  projectName: string;
+  stageName: string;
+  latestCreatedAt: string;
+  bookingCount: number;
+  studios: BookingStudioGroup[];
+}
+
+const bookingProjectKey = (booking: Booking) => {
+  const project = (booking.project_name ?? "").normalize("NFKC").trim().toLocaleLowerCase("zh-CN");
+  const speaker = (booking.stage_name ?? "").normalize("NFKC").trim().toLocaleLowerCase("zh-CN");
+  return project || speaker ? `${project}\u0000${speaker}` : booking.speaker_id;
+};
+
+const firstBookingSlot = (booking: Booking) => [...booking.slots].sort()[0] ?? booking.created_at;
+
+function groupVendorBookings(bookings: Booking[], mode: BookingDisplayMode): BookingProjectGroup[] {
+  const projects = new Map<string, { projectName: string; stageName: string; bookings: Booking[] }>();
+  for (const booking of bookings) {
+    const key = bookingProjectKey(booking);
+    const existing = projects.get(key);
+    if (existing) existing.bookings.push(booking);
+    else projects.set(key, {
+      projectName: booking.project_name || "未命名项目",
+      stageName: booking.stage_name || "未命名发音人",
+      bookings: [booking],
+    });
+  }
+
+  return [...projects.entries()].map(([key, project]) => {
+    const studioMap = new Map<string, BookingStudioGroup>();
+    for (const booking of project.bookings) {
+      const studioKey = booking.studio_id || `${booking.studio_name}\u0000${booking.city}`;
+      const existing = studioMap.get(studioKey);
+      if (existing) {
+        existing.bookings.push(booking);
+        if (firstBookingSlot(booking) < existing.firstSlot) existing.firstSlot = firstBookingSlot(booking);
+      } else {
+        studioMap.set(studioKey, {
+          key: studioKey,
+          studioName: booking.studio_name || "未命名录音棚",
+          city: booking.city || "未知地区",
+          address: booking.address || "",
+          firstSlot: firstBookingSlot(booking),
+          bookings: [booking],
+        });
+      }
+    }
+
+    const studios = [...studioMap.values()];
+    for (const studio of studios) {
+      studio.bookings.sort((a, b) => firstBookingSlot(a).localeCompare(firstBookingSlot(b)) || a.id.localeCompare(b.id));
+    }
+    studios.sort((a, b) => mode === "time_first"
+      ? a.firstSlot.localeCompare(b.firstSlot)
+        || a.studioName.localeCompare(b.studioName, "zh-CN")
+        || a.city.localeCompare(b.city, "zh-CN")
+      : a.city.localeCompare(b.city, "zh-CN")
+        || a.studioName.localeCompare(b.studioName, "zh-CN")
+        || a.firstSlot.localeCompare(b.firstSlot));
+
+    return {
+      key,
+      projectName: project.projectName,
+      stageName: project.stageName,
+      latestCreatedAt: project.bookings.reduce((latest, booking) => booking.created_at > latest ? booking.created_at : latest, ""),
+      bookingCount: project.bookings.length,
+      studios,
+    };
+  }).sort((a, b) => b.latestCreatedAt.localeCompare(a.latestCreatedAt) || a.key.localeCompare(b.key));
+}
+
 const MODE_LABEL: Record<MatchMode, string> = {
   schedule_first: "档期优先",
   location_first: "位置优先",
@@ -60,6 +144,7 @@ export function VendorDashboard({ account }: { account: Account }) {
     (request.status === "open" || request.status === "reopened") && request.desired.length > 0);
   const confirmedCount = bookings.filter((booking) => booking.status === "confirmed").length;
   const pendingCount = bookings.filter((booking) => booking.appeal_status === "pending").length;
+  const projectCount = new Set(bookings.map(bookingProjectKey)).size;
 
   const loadMatches = async (requestId: string) => {
     setNotice("");
@@ -123,7 +208,7 @@ export function VendorDashboard({ account }: { account: Account }) {
       )}
 
       <Card>
-        <SectionTitle right={<Badge tone="blue">{bookings.length} 条记录</Badge>}>预约记录</SectionTitle>
+        <SectionTitle right={<Badge tone="blue">{projectCount} 个项目</Badge>}>预约记录</SectionTitle>
         <VendorBookings bookings={bookings} onAppealed={reload} />
       </Card>
 
@@ -777,7 +862,8 @@ function VendorBookings({ bookings, onAppealed }: { bookings: Booking[]; onAppea
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
-  const ordered = useMemo(() => [...bookings].sort((a, b) => b.created_at.localeCompare(a.created_at)), [bookings]);
+  const [displayMode, setDisplayMode] = useState<BookingDisplayMode>("studio_first");
+  const projects = useMemo(() => groupVendorBookings(bookings, displayMode), [bookings, displayMode]);
 
   const submitAppeal = async () => {
     if (!appealFor) return;
@@ -790,36 +876,95 @@ function VendorBookings({ bookings, onAppealed }: { bookings: Booking[]; onAppea
     finally { setBusy(false); }
   };
 
-  if (ordered.length === 0) return <EmptyState>预约成功后，记录会固定显示在这里。</EmptyState>;
+  if (projects.length === 0) return <EmptyState>预约成功后，记录会固定显示在这里。</EmptyState>;
 
   return (
     <>
-      <div className="grid gap-3 md:grid-cols-2">
-        {ordered.map((booking) => (
-          <div key={booking.id} className={cn("rounded-xl border p-4", booking.status === "released" ? "border-border bg-neutral-50 opacity-75" : "border-border bg-white")}>
-            <div className="flex items-start justify-between gap-3">
+      <div className="mb-4 flex flex-col justify-between gap-3 rounded-xl bg-slate-50 p-3 sm:flex-row sm:items-center">
+        <div>
+          <p className="text-sm font-medium">记录排列方式</p>
+          <p className="text-xs text-muted-foreground">
+            {displayMode === "studio_first" ? "同地区录音棚排在一起，棚内按排期时间排列。" : "先按最早排期时间，再按录音棚和地区排列。"}
+          </p>
+        </div>
+        <div className="flex rounded-lg border border-border bg-white p-1">
+          {([
+            ["studio_first", "录音棚优先"],
+            ["time_first", "时间优先"],
+          ] as const).map(([mode, label]) => (
+            <button
+              key={mode}
+              type="button"
+              aria-pressed={displayMode === mode}
+              onClick={() => setDisplayMode(mode)}
+              className={cn(
+                "rounded-md px-3 py-1.5 text-sm font-medium transition",
+                displayMode === mode ? "bg-slate-900 text-white shadow-sm" : "text-muted-foreground hover:bg-slate-100",
+              )}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="flex flex-col gap-4">
+        {projects.map((project) => (
+          <section key={project.key} className="rounded-2xl border border-border bg-white p-4 shadow-sm">
+            <div className="flex flex-wrap items-start justify-between gap-3 border-b border-border pb-3">
               <div>
-                <p className="font-semibold">{booking.project_name} · {booking.stage_name}</p>
-                <p className="mt-1 text-sm text-muted-foreground">{booking.studio_name} · {booking.city}</p>
-                <p className="text-xs text-muted-foreground">{booking.address}</p>
+                <p className="text-lg font-semibold">{project.projectName} · {project.stageName}</p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {project.studios.length} 个录音棚 · {project.bookingCount} 个预约批次
+                </p>
               </div>
-              <Badge tone={booking.status === "confirmed" ? booking.appeal_status ? "amber" : "green" : "gray"}>
-                {booking.status === "released" ? "已取消" : booking.appeal_status ? "取消审核中" : "已确认"}
-              </Badge>
+              <Badge tone="blue">项目 / 发音人</Badge>
             </div>
-            <SlotChips keys={booking.slots} />
-            {booking.status === "confirmed" && (
-              <div className="mt-4 border-t border-border pt-3">
-                {booking.appeal_status ? (
-                  <p className="text-xs text-amber-700">
-                    {booking.appeal_by === "vendor" ? "你已提交取消申请，后台正在审核。" : "录音棚已申请取消，后台正在审核；审核前预约仍然有效。"}
-                  </p>
-                ) : (
-                  <Button variant="outline" onClick={() => { setAppealFor(booking); setErr(""); setReason(""); }}>申请取消预约</Button>
-                )}
-              </div>
-            )}
-          </div>
+
+            <div className="mt-3 flex flex-col gap-3">
+              {project.studios.map((studio) => (
+                <section key={studio.key} className="rounded-xl border border-slate-200 bg-slate-50/70 p-3 sm:p-4">
+                  <div>
+                    <h3 className="font-semibold">{studio.studioName} · {studio.city}</h3>
+                    {studio.address && <p className="mt-0.5 text-xs text-muted-foreground">{studio.address}</p>}
+                  </div>
+
+                  <div className="mt-3 flex flex-col gap-2">
+                    {studio.bookings.map((booking, index) => (
+                      <div
+                        key={booking.id}
+                        className={cn(
+                          "rounded-lg border bg-white p-3",
+                          booking.status === "released" && "bg-neutral-50 opacity-75",
+                        )}
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <p className="text-xs font-medium text-muted-foreground">
+                            {studio.bookings.length > 1 ? `预约批次 ${index + 1}` : "预约档期"} · {booking.slots.length} 个半小时
+                          </p>
+                          <Badge tone={booking.status === "confirmed" ? booking.appeal_status ? "amber" : "green" : "gray"}>
+                            {booking.status === "released" ? "已取消" : booking.appeal_status ? "取消审核中" : "已确认"}
+                          </Badge>
+                        </div>
+                        <SlotChips keys={[...booking.slots].sort()} />
+                        {booking.status === "confirmed" && (
+                          <div className="mt-3 border-t border-border pt-3">
+                            {booking.appeal_status ? (
+                              <p className="text-xs text-amber-700">
+                                {booking.appeal_by === "vendor" ? "你已提交取消申请，后台正在审核。" : "录音棚已申请取消，后台正在审核；审核前预约仍然有效。"}
+                              </p>
+                            ) : (
+                              <Button variant="outline" onClick={() => { setAppealFor(booking); setErr(""); setReason(""); }}>申请取消本批预约</Button>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </section>
+              ))}
+            </div>
+          </section>
         ))}
       </div>
 
