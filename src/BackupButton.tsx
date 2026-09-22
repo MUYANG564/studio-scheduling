@@ -1,33 +1,34 @@
 import { useState } from "react";
+import writeExcelFile from "write-excel-file/browser";
 import { api, ApiError } from "./api";
 import { Button } from "./ui";
 
+type Sheet = { name: string; columns: string[]; rows: string[][] };
+type BackupResult = { filename: string; sheets: Sheet[] };
+
 export function BackupButton({ className = "" }: { className?: string }) {
   const [busy, setBusy] = useState(false);
-  const [documentUrl, setDocumentUrl] = useState("");
 
-  const createBackup = async () => {
-    const opened = window.open("about:blank", "_blank");
+  const exportExcel = async () => {
     setBusy(true);
-    setDocumentUrl("");
     try {
-      const result = await api.post("backup/dingtalk");
-      setDocumentUrl(result.url);
-      if (opened) opened.location.href = result.url;
+      const result = (await api.post("backup/export")) as BackupResult;
+      const workbook = result.sheets.map((sheet) => ({
+        sheet: sheet.name,
+        data: [sheet.columns, ...sheet.rows],
+        stickyRowsCount: 1,
+      }));
+      await writeExcelFile(workbook).toFile(result.filename);
     } catch (error) {
-      opened?.close();
-      alert(error instanceof ApiError ? error.message : "备份失败，请稍后重试。");
+      alert(error instanceof ApiError ? error.message : "导出失败，请稍后重试。");
     } finally {
       setBusy(false);
     }
   };
 
   return (
-    <div className="flex flex-col items-start gap-1 sm:items-end">
-      <Button className={className} variant="outline" onClick={createBackup} disabled={busy}>
-        {busy ? "正在生成…" : "备份到钉钉文档"}
-      </Button>
-      {documentUrl && <a className="text-xs underline" href={documentUrl} target="_blank" rel="noreferrer">打开刚创建的备份</a>}
-    </div>
+    <Button className={className} variant="outline" onClick={exportExcel} disabled={busy}>
+      {busy ? "正在导出…" : "导出 Excel 备份"}
+    </Button>
   );
 }

@@ -47,44 +47,57 @@ const SECTION_FIELDS = {
   city_proximities: ["id", "city", "nearby_city", "priority", "created_at"],
 };
 
-const valueText = (value) => {
-  if (value === null || value === undefined || value === "") return "—";
+const cellValue = (value) => {
+  if (value === null || value === undefined || value === "") return "";
   if (typeof value === "boolean") return value ? "是" : "否";
-  if (Array.isArray(value)) return value.length ? value.join("<br>") : "—";
-  if (typeof value === "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return value.join("\n");
+  if (typeof value === "object") return JSON.stringify(value, null, 2);
   return String(value);
 };
 
-const cell = (value) => valueText(value)
-  .replaceAll("&", "&amp;")
-  .replaceAll("<", "&lt;")
-  .replaceAll(">", "&gt;")
-  .replaceAll("|", "\\|")
-  .replaceAll("\n", "<br>");
-
-function table(section) {
-  const rows = section.rows ?? [];
-  if (rows.length === 0) return "暂无记录。";
-  const fields = (SECTION_FIELDS[section.key] ?? Object.keys(rows[0]))
-    .filter((field) => rows.some((row) => row[field] !== undefined));
-  const header = `| ${fields.map((field) => FIELD_LABELS[field] ?? field).join(" | ")} |`;
-  const separator = `| ${fields.map(() => "---").join(" | ")} |`;
-  const body = rows.map((row) => `| ${fields.map((field) => cell(row[field])).join(" | ")} |`).join("\n");
-  return `${header}\n${separator}\n${body}`;
+// Excel worksheet names: max 31 chars, cannot contain : \ / ? * [ ] and must be unique.
+function sheetName(title, used) {
+  let base = String(title).replace(/[:\\/?*[\]]/g, " ").trim().slice(0, 28) || "数据";
+  let name = base;
+  let n = 2;
+  while (used.has(name)) {
+    name = `${base.slice(0, 28)}(${n})`;
+    n += 1;
+  }
+  used.add(name);
+  return name;
 }
 
-export function renderBackupMarkdown({ title, account, generatedAt, sections }) {
-  const blocks = [
-    `# ${title}`,
-    "",
-    `- 导出时间：${new Date(generatedAt).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" })}`,
-    `- 导出账号：${account.display_name || account.username}（${account.username}）`,
-    `- 账号角色：${account.role}`,
-    "",
-    "> 本文档由录音棚档期匹配平台生成，用于升级前备份。密码哈希等安全信息不会导出。",
-  ];
-  for (const section of sections) {
-    blocks.push("", `## ${section.title}`, "", table(section));
-  }
-  return blocks.join("\n");
+export function buildBackup({ account, generatedAt, sections }) {
+  const roleLabel = { admin: "后台全站", studio: "录音棚", vendor: "供应商" }[account.role] ?? account.role;
+  const title = `录音棚档期匹配平台·${roleLabel}数据备份·${generatedAt.slice(0, 10)}`;
+  const filename = `录音棚档期匹配平台-${roleLabel}数据备份-${generatedAt.slice(0, 10)}.xlsx`;
+  const used = new Set();
+
+  const infoSheet = {
+    name: sheetName("导出说明", used),
+    columns: ["项目", "内容"],
+    rows: [
+      ["标题", title],
+      ["导出时间", new Date(generatedAt).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" })],
+      ["导出账号", `${account.display_name || account.username}（${account.username}）`],
+      ["账号角色", roleLabel],
+      ["说明", "本文件由录音棚档期匹配平台生成，用于升级前备份。密码等安全信息不会导出。"],
+    ],
+  };
+
+  const sheets = sections.map((section) => {
+    const rows = section.rows ?? [];
+    const configuredFields = SECTION_FIELDS[section.key] ?? (rows[0] ? Object.keys(rows[0]) : []);
+    const fields = rows.length === 0
+      ? configuredFields
+      : configuredFields.filter((field) => rows.some((row) => row[field] !== undefined));
+    return {
+      name: sheetName(section.title, used),
+      columns: fields.map((field) => FIELD_LABELS[field] ?? field),
+      rows: rows.map((row) => fields.map((field) => cellValue(row[field]))),
+    };
+  });
+
+  return { title, filename, sheets: [infoSheet, ...sheets] };
 }

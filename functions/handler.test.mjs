@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import { createMemoryClient } from "../dev/memory-supabase.mjs";
 import { createFileStore } from "../server/store.mjs";
 import { signToken } from "./authlib.mjs";
-import { DingTalkError } from "./dingtalk.mjs";
 import { handleApp } from "./handler.mjs";
 
 const TEST_SECRET = "booking-appeal-test-secret";
@@ -47,7 +46,7 @@ function makeDb() {
   };
 }
 
-async function callWithClient(supabase, action, accountId, body, method = "POST", dingtalk) {
+async function callWithClient(supabase, action, accountId, body, method = "POST") {
   const token = await signToken(TEST_SECRET, {
     sub: accountId,
     exp: Math.floor(Date.now() / 1000) + 3600,
@@ -57,12 +56,12 @@ async function callWithClient(supabase, action, accountId, body, method = "POST"
     headers: { "content-type": "application/json", "x-session-token": token },
     body: method === "GET" ? undefined : JSON.stringify(body ?? {}),
   });
-  const response = await handleApp({ request, supabase, dingtalk });
+  const response = await handleApp({ request, supabase });
   return { status: response.status, body: await response.json() };
 }
 
-async function call(db, action, accountId, body, method = "POST", dingtalk) {
-  return callWithClient(createMemoryClient(db), action, accountId, body, method, dingtalk);
+async function call(db, action, accountId, body, method = "POST") {
+  return callWithClient(createMemoryClient(db), action, accountId, body, method);
 }
 
 test("vendor appeal is owner-only, visible on both booking lists, and blocks a second pending appeal", async () => {
@@ -297,58 +296,33 @@ test("admin availability changes preserve locked bookings and notify the studio"
   assert.equal(db.notifications.at(-1).account_id, "studio-account");
 });
 
-test("DingTalk backups are role-scoped and never include password hashes", async () => {
+test("Excel backups are role-scoped and never include password hashes", async () => {
   const db = makeDb();
   db.accounts[0].password_hash = "must-not-leak";
   db.accounts[3].display_name = "不可见的其他供应商";
   db.speakers[0].stage_name = "<测试角色>";
-  const captured = [];
-  const dingtalk = {
-    async createDocument(input) {
-      captured.push(input);
-      return { documentId: `doc-${captured.length}`, url: `https://docs.dingtalk.com/doc-${captured.length}` };
-    },
-  };
 
-  const admin = await call(db, "backup/dingtalk", "admin-account", {}, "POST", dingtalk);
+  const textOf = (backup) => JSON.stringify(backup.sheets);
+
+  const admin = await call(db, "backup/export", "admin-account", {}, "POST");
   assert.equal(admin.status, 200);
-  assert.match(captured[0].content, /不可见的其他供应商/);
-  assert.doesNotMatch(captured[0].content, /must-not-leak/);
+  assert.match(admin.body.filename, /后台全站数据备份.*\.xlsx$/);
+  assert.match(textOf(admin.body), /不可见的其他供应商/);
+  assert.doesNotMatch(textOf(admin.body), /must-not-leak/);
 
-  const vendor = await call(db, "backup/dingtalk", "vendor-account", {}, "POST", dingtalk);
+  const vendor = await call(db, "backup/export", "vendor-account", {}, "POST");
   assert.equal(vendor.status, 200);
-  assert.match(captured[1].content, /测试项目/);
-  assert.match(captured[1].content, /&lt;测试角色&gt;/);
-  assert.match(captured[1].content, /测试录音棚/);
-  assert.doesNotMatch(captured[1].content, /不可见的其他供应商/);
+  assert.match(textOf(vendor.body), /测试项目/);
+  assert.match(textOf(vendor.body), /<测试角色>/);
+  assert.match(textOf(vendor.body), /测试录音棚/);
+  assert.doesNotMatch(textOf(vendor.body), /不可见的其他供应商/);
+  assert.doesNotMatch(textOf(vendor.body), /must-not-leak/);
 
-  const studio = await call(db, "backup/dingtalk", "studio-account", {}, "POST", dingtalk);
+  const studio = await call(db, "backup/export", "studio-account", {}, "POST");
   assert.equal(studio.status, 200);
-  assert.match(captured[2].content, /测试录音棚/);
-  assert.match(captured[2].content, /测试项目/);
-  assert.doesNotMatch(captured[2].content, /不可见的其他供应商/);
-});
-
-test("DingTalk backup reports missing server configuration", async () => {
-  const db = makeDb();
-  const result = await call(db, "backup/dingtalk", "vendor-account", {}, "POST", {
-    async createDocument() {
-      throw new DingTalkError("dingtalk_not_configured");
-    },
-  });
-  assert.equal(result.status, 503);
-  assert.equal(result.body.error, "dingtalk_not_configured");
-});
-
-test("DingTalk backup preserves safe diagnostic error codes", async () => {
-  const db = makeDb();
-  const result = await call(db, "backup/dingtalk", "vendor-account", {}, "POST", {
-    async createDocument() {
-      throw new DingTalkError("dingtalk_operator_failed");
-    },
-  });
-  assert.equal(result.status, 502);
-  assert.equal(result.body.error, "dingtalk_operator_failed");
+  assert.match(textOf(studio.body), /测试录音棚/);
+  assert.match(textOf(studio.body), /测试项目/);
+  assert.doesNotMatch(textOf(studio.body), /不可见的其他供应商/);
 });
 
 test("only admins can broadcast announcements and send account messages", async () => {

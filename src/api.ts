@@ -24,12 +24,6 @@ const MESSAGES: Record<string, string> = {
   cannot_delete_self: "不能删除当前登录的管理员账号。",
   not_found: "未找到相关记录。",
   database_request_failed: "数据服务暂时不可用,请稍后重试。",
-  dingtalk_not_configured: "管理员尚未配置钉钉文档导出，请配置后再试。",
-  dingtalk_auth_failed: "钉钉应用身份验证失败，请管理员检查 AppKey 和 AppSecret。",
-  dingtalk_operator_failed: "无法取得钉钉操作人信息，请管理员检查 userId 和通讯录权限。",
-  dingtalk_document_create_failed: "钉钉文档创建失败，请管理员检查知识库与文档写入权限。",
-  dingtalk_document_write_failed: "钉钉文档内容写入失败，请管理员检查文档写入权限。",
-  dingtalk_export_failed: "钉钉文档创建失败，请稍后重试或联系管理员。",
 };
 
 const TOKEN_KEY = "studio_sched_token";

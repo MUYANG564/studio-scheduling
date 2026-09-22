@@ -54,7 +54,7 @@ export function AdminDashboard() {
           <div>
             <p className="text-sm text-indigo-200">后台管理工作台</p>
             <h1 className="mt-1 text-2xl font-semibold">全站业务记录</h1>
-            <p className="mt-2 text-sm text-slate-300">可随时将当前全站记录备份到钉钉文档。</p>
+            <p className="mt-2 text-sm text-slate-300">可随时将当前全站记录导出为 Excel 备份。</p>
           </div>
           <BackupButton className="border-white/20 bg-white/10 text-white hover:bg-white/20" />
         </div>

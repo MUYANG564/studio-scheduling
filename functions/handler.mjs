@@ -2,13 +2,10 @@
 // Single Function entry: routes by ?action= and HTTP method. All authorization
 // is enforced here. The browser never talks to the database directly.
 import { hashPassword, verifyPassword, signToken, verifyToken, sessionSecret } from "./authlib.mjs";
-import { renderBackupMarkdown } from "./backup.mjs";
-import { createDingTalkClient, DingTalkError } from "./dingtalk.mjs";
+import { buildBackup } from "./backup.mjs";
 import {
   computeMatches, isWithinBusinessHours, normalizeBusinessHours, slotKey,
 } from "./matching.mjs";
-
-const dingTalkClient = createDingTalkClient();
 
 const json = (body, status = 200, headers = {}) =>
   Response.json(body, { status, headers: { "cache-control": "no-store", ...headers } });
@@ -157,7 +154,7 @@ function requireRole(account, ...roles) {
 }
 
 // ---- main dispatch ----
-export async function handleApp({ request, supabase, dingtalk = dingTalkClient }) {
+export async function handleApp({ request, supabase }) {
   const url = new URL(request.url);
   const action = url.searchParams.get("action");
   try {
@@ -167,7 +164,7 @@ export async function handleApp({ request, supabase, dingtalk = dingTalkClient }
       case "me": return await me(request, supabase);
       case "notifications": return await getNotifications(request, supabase);
       case "notifications/read": return await readNotification(request, supabase);
-      case "backup/dingtalk": return await exportDingTalkBackup(request, supabase, dingtalk);
+      case "backup/export": return await exportBackup(request, supabase);
       // admin
       case "admin/overview": return await adminOverview(request, supabase);
       case "admin/create-account": return await adminCreateAccount(request, supabase);
@@ -375,36 +372,16 @@ async function backupSections(supabase, account) {
   ];
 }
 
-async function exportDingTalkBackup(request, supabase, dingtalk) {
+async function exportBackup(request, supabase) {
   requireMethod(request, "POST");
   const account = await authenticate(request, supabase);
   const generatedAt = NOW();
-  const roleLabel = { admin: "后台全站", studio: "录音棚", vendor: "供应商" }[account.role];
-  const title = `录音棚档期匹配平台·${roleLabel}数据备份·${generatedAt.slice(0, 10)}`;
-  const content = renderBackupMarkdown({
-    title,
+  const backup = buildBackup({
     account: publicAccount(account),
     generatedAt,
     sections: await backupSections(supabase, account),
   });
-  try {
-    const document = await dingtalk.createDocument({ title, content });
-    return json({ ok: true, url: document.url, document_id: document.documentId });
-  } catch (error) {
-    if (error instanceof DingTalkError && error.code === "dingtalk_not_configured") {
-      throw new HttpError("dingtalk_not_configured", 503);
-    }
-    const diagnosticCodes = new Set([
-      "dingtalk_auth_failed",
-      "dingtalk_operator_failed",
-      "dingtalk_document_create_failed",
-      "dingtalk_document_write_failed",
-    ]);
-    if (error instanceof DingTalkError && diagnosticCodes.has(error.code)) {
-      throw new HttpError(error.code, 502);
-    }
-    throw new HttpError("dingtalk_export_failed", 502);
-  }
+  return json({ ok: true, ...backup });
 }
 
 // ---- admin ----
