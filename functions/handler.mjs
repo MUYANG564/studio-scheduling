@@ -192,6 +192,7 @@ export async function handleApp({ request, supabase }) {
       case "vendor/match-options": return await vendorMatchOptions(request, supabase);
       case "vendor/request/create": return await vendorCreateRequest(request, supabase);
       case "vendor/request/update": return await vendorUpdateRequest(request, supabase);
+      case "vendor/request/cancel": return await vendorCancelRequest(request, supabase);
       case "vendor/request/matches": return await vendorRequestMatches(request, supabase);
       case "vendor/book": return await vendorBook(request, supabase);
       case "vendor/bookings": return await vendorBookings(request, supabase);
@@ -541,7 +542,7 @@ async function adminUpdateRecord(request, supabase) {
     subject = `项目 ${patch.project_name} · ${patch.stage_name}`;
   } else if (body.target_type === "request") {
     const { data: target } = await supabase.from("schedule_requests").select("*").eq("id", body.target_id).maybeSingle();
-    if (!hasOnlyChanges("slots", "preferred_cities", "match_mode", "status") || !target || !["open", "reopened", "closed"].includes(changes.status)) throw new HttpError("invalid_body", 400);
+    if (!hasOnlyChanges("slots", "preferred_cities", "match_mode", "status") || !target || !["open", "reopened", "closed", "cancelled"].includes(changes.status)) throw new HttpError("invalid_body", 400);
     const desired = validateDesired(changes.slots);
     const { preferredCities, matchMode } = await requestPreferences(supabase, changes.preferred_cities, changes.match_mode);
     const { error } = await supabase.from("schedule_requests").update({
@@ -959,6 +960,20 @@ async function vendorUpdateRequest(request, supabase) {
   }).eq("id", req.id);
   const matches = await matchesForRequest(supabase, desired, preferredCities, matchMode);
   return json({ ok: true, request_id: req.id, status: req.status, ...matches });
+}
+
+async function vendorCancelRequest(request, supabase) {
+  requireMethod(request, "POST");
+  const account = await authenticate(request, supabase);
+  requireRole(account, "vendor");
+  const body = await readJson(request);
+  if (!str(body.request_id, 64)) throw new HttpError("invalid_body", 400);
+  const { data: req } = await supabase.from("schedule_requests").select("*").eq("id", body.request_id).maybeSingle();
+  if (!req || req.vendor_account_id !== account.id) throw new HttpError("not_found", 404);
+  if (req.status !== "open" && req.status !== "reopened") throw new HttpError("invalid_state", 409);
+  const { error } = await supabase.from("schedule_requests").update({ status: "cancelled" }).eq("id", req.id);
+  if (error) throw new HttpError("database_request_failed", 503);
+  return json({ ok: true, request_id: req.id, status: "cancelled" });
 }
 
 async function vendorRequestMatches(request, supabase) {

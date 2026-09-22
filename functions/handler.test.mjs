@@ -64,6 +64,27 @@ async function call(db, action, accountId, body, method = "POST") {
   return callWithClient(createMemoryClient(db), action, accountId, body, method);
 }
 
+test("vendor can cancel only their open request without changing confirmed bookings", async () => {
+  const db = makeDb();
+  db.schedule_requests[0].status = "open";
+  const bookingBefore = structuredClone(db.bookings[0]);
+  const slotBefore = structuredClone(db.slots[0]);
+
+  const forbidden = await call(db, "vendor/request/cancel", "other-vendor", { request_id: "request-id" });
+  assert.equal(forbidden.status, 404);
+  assert.equal(db.schedule_requests[0].status, "open");
+
+  const cancelled = await call(db, "vendor/request/cancel", "vendor-account", { request_id: "request-id" });
+  assert.equal(cancelled.status, 200);
+  assert.equal(cancelled.body.status, "cancelled");
+  assert.equal(db.schedule_requests[0].status, "cancelled");
+  assert.deepEqual(db.bookings[0], bookingBefore);
+  assert.deepEqual(db.slots[0], slotBefore);
+
+  const repeated = await call(db, "vendor/request/cancel", "vendor-account", { request_id: "request-id" });
+  assert.equal(repeated.status, 409);
+});
+
 test("vendor appeal is owner-only, visible on both booking lists, and blocks a second pending appeal", async () => {
   const db = makeDb();
 

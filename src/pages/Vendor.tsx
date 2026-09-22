@@ -127,6 +127,9 @@ export function VendorDashboard({ account }: { account: Account }) {
   const [notice, setNotice] = useState("");
   const [bookingOpen, setBookingOpen] = useState(false);
   const [speakerOpen, setSpeakerOpen] = useState(false);
+  const [cancelFor, setCancelFor] = useState<OpenRequest | null>(null);
+  const [cancelBusy, setCancelBusy] = useState(false);
+  const [cancelError, setCancelError] = useState("");
 
   const reload = async () => {
     const [sp, rq, bk, options] = await Promise.all([
@@ -157,6 +160,22 @@ export function VendorDashboard({ account }: { account: Account }) {
     setMatch(null);
     setNotice("");
     setBookingOpen(true);
+  };
+
+  const cancelRequest = async () => {
+    if (!cancelFor) return;
+    setCancelBusy(true);
+    setCancelError("");
+    try {
+      await api.post("vendor/request/cancel", { request_id: cancelFor.id });
+      await reload();
+      setCancelFor(null);
+      setNotice("待安排需求已取消，已确认的预约不受影响。");
+    } catch (error) {
+      setCancelError(error instanceof ApiError ? error.message : "取消失败");
+    } finally {
+      setCancelBusy(false);
+    }
   };
 
   if (loading) return <div className="flex justify-center py-16"><Spinner /></div>;
@@ -191,14 +210,20 @@ export function VendorDashboard({ account }: { account: Account }) {
           <div className="grid gap-3 md:grid-cols-2">
             {openReselect.map((request) => (
               <div key={request.id} className="rounded-xl border border-amber-200 bg-white p-4">
-                <div className="flex items-start justify-between gap-3">
+                <div className="flex flex-wrap items-start justify-between gap-3">
                   <div>
                     <p className="font-semibold">{request.project_name} · {request.stage_name}</p>
                     <p className="mt-1 text-xs text-muted-foreground">
                       {request.status === "reopened" ? "原预约已释放，请重新选择" : `还有 ${request.desired.length} 个档期未安排`}
                     </p>
                   </div>
-                  <Button onClick={() => loadMatches(request.id)}>{request.status === "reopened" ? "重新选择" : "继续安排"}</Button>
+                  <div className="flex flex-wrap gap-2">
+                    <Button variant="outline" onClick={() => {
+                      setCancelError("");
+                      setCancelFor(request);
+                    }}>取消待安排</Button>
+                    <Button onClick={() => loadMatches(request.id)}>{request.status === "reopened" ? "重新选择" : "继续安排"}</Button>
+                  </div>
                 </div>
                 <SlotChips keys={request.desired} />
               </div>
@@ -211,6 +236,27 @@ export function VendorDashboard({ account }: { account: Account }) {
         <SectionTitle right={<Badge tone="blue">{projectCount} 个项目</Badge>}>预约记录</SectionTitle>
         <VendorBookings bookings={bookings} onAppealed={reload} />
       </Card>
+
+      <Dialog open={Boolean(cancelFor)} onOpenChange={(open) => { if (!open && !cancelBusy) setCancelFor(null); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>取消待安排需求</DialogTitle>
+            <DialogDescription>仅取消尚未安排的档期，不会影响已经确认的预约。</DialogDescription>
+          </DialogHeader>
+          {cancelFor && (
+            <div className="rounded-lg border border-border bg-neutral-50 p-3 text-sm">
+              <p className="font-medium">{cancelFor.project_name} · {cancelFor.stage_name}</p>
+              <p className="mt-1 text-muted-foreground">将取消剩余 {cancelFor.desired.length} 个待安排档期</p>
+              <SlotChips keys={cancelFor.desired} />
+            </div>
+          )}
+          {cancelError && <p className="text-sm text-destructive">{cancelError}</p>}
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" disabled={cancelBusy} onClick={() => setCancelFor(null)}>暂不取消</Button>
+            <Button variant="danger" disabled={cancelBusy} onClick={cancelRequest}>{cancelBusy ? "取消中…" : "确认取消待安排"}</Button>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={speakerOpen} onOpenChange={setSpeakerOpen}>
         <DialogContent>

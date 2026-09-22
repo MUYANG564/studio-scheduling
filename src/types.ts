@@ -87,7 +87,7 @@ export interface ScheduleRequest {
   desired: string[];
   preferred_cities?: string[];
   match_mode?: MatchMode;
-  status: "open" | "reopened" | "closed";
+  status: "open" | "reopened" | "closed" | "cancelled";
   created_at: string;
 }
 

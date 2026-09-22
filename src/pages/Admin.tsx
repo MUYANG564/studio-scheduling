@@ -262,7 +262,9 @@ function RequestsTab({ data, onChanged }: { data: Overview; onChanged: () => voi
                 <SlotChips keys={request.desired} />
               </div>
               <div className="flex items-center gap-2">
-                <Badge tone={request.status === "closed" ? "gray" : "blue"}>{request.status}</Badge>
+                <Badge tone={request.status === "closed" || request.status === "cancelled" ? "gray" : "blue"}>
+                  {{ open: "待预约", reopened: "已重开", closed: "已关闭", cancelled: "已取消" }[request.status]}
+                </Badge>
                 <RecordEditor
                   targetType="request"
                   targetId={request.id}
@@ -277,7 +279,7 @@ function RequestsTab({ data, onChanged }: { data: Overview; onChanged: () => voi
                     { key: "slots", label: "期望档期", type: "textarea", required: true, hint: "每行一个，格式：2026-09-30 09:30" },
                     { key: "preferred_cities", label: "意向城市", hint: "多个城市用顿号或逗号分隔" },
                     { key: "match_mode", label: "P2 模式", type: "select", options: [["schedule_first", "档期优先"], ["location_first", "地区优先"]] },
-                    { key: "status", label: "状态", type: "select", options: [["open", "待预约"], ["reopened", "已重开"], ["closed", "已关闭"]] },
+                    { key: "status", label: "状态", type: "select", options: [["open", "待预约"], ["reopened", "已重开"], ["closed", "已关闭"], ["cancelled", "已取消"]] },
                   ]}
                   onSaved={onChanged}
                 />
